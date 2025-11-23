@@ -1,0 +1,48 @@
+# MM lab related (Main Project)
+jet_detection_project/work_dirs/
+jet_detection_project/outputs/
+*.pth
+*.log
+*.log.json
+
+# Dataset and annotations
+jet_detection_project/coco_annotations/*.json
+jet_detection_project/archive/
+jet_detection_project/dataset/
+jet_detection_project/testing/output_test/
+
+# Node (UI Project)
+AntJetDetUI/node_modules/
+AntJetDetUI/dist/
+AntJetDetUI/build/
+AntJetDetUI/.env
+AntJetDetUI/.env.local
+
+# Python (General)
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.venv/
+**/venv/
+**/ENV/
+
+# UI Backend Specific
+AntJetDetUI/backend/models/*.pth
+AntJetDetUI/backend/models/*.py
+AntJetDetUI/backend/debug_analyze.log
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp/Inference
+jet_detection_project/_uploaded_image.jpg
+jet_detection_project/testing/video_input/
+AntJetDetUI/dummy_test*.jpg
+AntJetDetUI/t.jpg
+AntJetDetUI/test_image.jpg
