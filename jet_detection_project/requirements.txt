@@ -1,0 +1,37 @@
+"""
+MMDetection 3.x + MMEngine 0.10 + MMCV 2.x için minimum bağımlılıklar.
+Önce PyTorch (CUDA 11.6) kurun:
+    pip install torch==1.12.1+cu116 torchvision==0.13.1+cu116 torchaudio==0.12.1+cu116 \
+        --extra-index-url https://download.pytorch.org/whl/cu116
+Ardından MMCV wheel (CUDA 11.6, torch 1.12) yükleyin:
+    pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.12/index.html
+"""
+torch==1.12.1+cu116
+torchvision==0.13.1+cu116
+torchaudio==0.12.1+cu116
+
+# MMDetection 3.x yığını
+mmengine==0.10.3
+mmcv==2.1.0
+mmdet==3.3.0
+mmcls==1.0.0
+mmyolo==0.6.0
+
+# Veri işleme
+opencv-python>=4.6.0
+Pillow>=9.0.0
+numpy>=1.21.0
+pandas>=1.4.0
+
+# Görselleştirme
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Model optimizasyonu
+tensorboard>=2.9.0
+wandb>=0.13.0
+
+# Yardımcı kütüphaneler
+tqdm>=4.64.0
+pycocotools>=2.0.4
+albumentations>=1.2.0
