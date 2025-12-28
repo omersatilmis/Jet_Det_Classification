@@ -1,0 +1,33 @@
+# MM lab related
+work_dirs/
+outputs/
+*.pth
+*.log
+*.log.json
+
+# Dataset and annotations
+coco_annotations/*.json
+archive/
+dataset/
+testing/output_test/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Temp/Inference
+_uploaded_image.jpg
+testing/video_input/
