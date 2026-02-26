@@ -1,0 +1,7 @@
+--- TRAIN DIAGNOSTICS ---
+📏 Ekstrem Oranlar: Nesnelerin %17.7'i çok uzun veya çok geniş. 'YOLOv5RandomAffine' gibi augmentasyonlar kritik.
+--- VALIDATION DIAGNOSTICS ---
+📏 Ekstrem Oranlar: Nesnelerin %24.2'i çok uzun veya çok geniş. 'YOLOv5RandomAffine' gibi augmentasyonlar kritik.
+--- TEST DIAGNOSTICS ---
+⚠️ Dengesizlik: F22 sınıfı çok az (28 adet). Model bu sınıfı öğrenmekte zorlanabilir.
+📏 Ekstrem Oranlar: Nesnelerin %21.4'i çok uzun veya çok geniş. 'YOLOv5RandomAffine' gibi augmentasyonlar kritik.

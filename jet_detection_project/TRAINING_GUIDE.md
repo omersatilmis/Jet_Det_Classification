@@ -34,6 +34,10 @@ python mmdetection/scripts/train_jet_detection.py \
   --config mmdetection/configs/cascade_rcnn_convnext_tiny.py \
   --work-dir work_dirs/mmdetection/cascade_rcnn_convnext_tiny_v2 \
   --resume
+
+# [NEW] Stratified K-Fold Eğitimi (Onerilen)
+# Bu script otomatik olarak 5 fold'u ardarda egitir.
+python mmdetection/scripts/run_mmdet_kfold.py
 ```
 
 | Parametre | Değer |

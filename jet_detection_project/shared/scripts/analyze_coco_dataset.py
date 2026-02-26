@@ -3,9 +3,12 @@ import json
 from pathlib import Path
 from collections import Counter, defaultdict
 import random
+import os
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import LinearSegmentedColormap
 
 try:
     import cv2
@@ -18,209 +21,204 @@ def load_coco(path: Path) -> dict:
         return json.load(f)
 
 
+def get_coco_size_category(area: float) -> str:
+    """COCO size categories: Small (< 32^2), Medium, Large (> 96^2)"""
+    if area < 32 * 32:
+        return "Small"
+    elif area < 96 * 96:
+        return "Medium"
+    else:
+        return "Large"
+
+
 def coco_stats(coco: dict) -> dict:
     images = coco.get("images", [])
     anns = coco.get("annotations", [])
     cats = coco.get("categories", [])
 
     cat_id_to_name = {c["id"]: c.get("name", str(c["id"])) for c in cats}
+    img_id_to_size = {im["id"]: (im.get("width", 0), im.get("height", 0)) for im in images}
 
     img_count = len(images)
     ann_count = len(anns)
 
-    # annotations per image
+    # Basic counters
     ann_per_img = Counter([a["image_id"] for a in anns])
-
-    # class counts (annotation count)
     class_counts = Counter()
-    bbox_wh = []   # (w, h)
-    bbox_area = []
-
-    # images per class (unique image count per class)
     class_images = defaultdict(set)
+    
+    # Size analysis
+    size_categories = Counter()
+    class_size_dist = defaultdict(Counter)
+    
+    # Geometry analysis
+    bbox_wh = []
+    bbox_areas = []
+    aspect_ratios = []
+    rel_areas = []
+    
+    # Spatial analysis
+    spatial_coords = defaultdict(list)  # class -> list of normalized centers (cx, cy)
 
     for a in anns:
         cid = a["category_id"]
         cname = cat_id_to_name.get(cid, str(cid))
-
         class_counts[cname] += 1
-
-        # images per class
         class_images[cname].add(a["image_id"])
 
         x, y, w, h = a["bbox"]
+        area = w * h
+        bbox_areas.append(area)
         bbox_wh.append((w, h))
-        bbox_area.append(w * h)
-
-    images_per_class = {k: len(v) for k, v in class_images.items()}
-
-    bbox_wh = np.array(bbox_wh, dtype=np.float32) if bbox_wh else np.zeros((0, 2), dtype=np.float32)
-    bbox_area = np.array(bbox_area, dtype=np.float32) if bbox_area else np.zeros((0,), dtype=np.float32)
-
-    # image sizes
-    widths = np.array([im.get("width", 0) for im in images], dtype=np.int32) if images else np.zeros((0,), dtype=np.int32)
-    heights = np.array([im.get("height", 0) for im in images], dtype=np.int32) if images else np.zeros((0,), dtype=np.int32)
-
-    # bbox relative area
-    img_id_to_size = {im["id"]: (im.get("width", 0), im.get("height", 0)) for im in images}
-    rel_area = []
-    for a in anns:
+        
+        # Aspect Ratio
+        if h > 0:
+            aspect_ratios.append(w / h)
+            
+        # Size category
+        sz_cat = get_coco_size_category(area)
+        size_categories[sz_cat] += 1
+        class_size_dist[cname][sz_cat] += 1
+        
+        # Relative area
         w_img, h_img = img_id_to_size.get(a["image_id"], (0, 0))
         if w_img > 0 and h_img > 0:
-            rel_area.append((a["bbox"][2] * a["bbox"][3]) / (w_img * h_img))
-    rel_area = np.array(rel_area, dtype=np.float32) if rel_area else np.zeros((0,), dtype=np.float32)
+            rel_areas.append(area / (w_img * h_img))
+            # Spatial center
+            cx = (x + w/2) / w_img
+            cy = (y + h/2) / h_img
+            spatial_coords[cname].append((cx, cy))
+
+    # Image sizes
+    widths = np.array([im.get("width", 0) for im in images])
+    heights = np.array([im.get("height", 0) for im in images])
 
     return {
         "img_count": img_count,
         "ann_count": ann_count,
         "class_counts": dict(class_counts),
-        "images_per_class": dict(images_per_class),
-        "ann_per_img": ann_per_img,
-        "img_widths": widths,
-        "img_heights": heights,
+        "images_per_class": {k: len(v) for k, v in class_images.items()},
+        "ann_per_img": dict(ann_per_img),
+        "img_widths": widths.tolist(),
+        "img_heights": heights.tolist(),
+        "bbox_areas": bbox_areas,
         "bbox_wh": bbox_wh,
-        "bbox_area": bbox_area,
-        "bbox_rel_area": rel_area,
+        "aspect_ratios": aspect_ratios,
+        "rel_areas": rel_areas,
+        "size_categories": dict(size_categories),
+        "class_size_dist": {k: dict(v) for k, v in class_size_dist.items()},
+        "spatial_coords": {k: v for k, v in spatial_coords.items()},
         "categories": [cat_id_to_name[c["id"]] for c in cats],
     }
 
 
-def describe_arr(name: str, arr: np.ndarray) -> str:
-    if arr.size == 0:
-        return f"{name}: (boş)"
-    return (
-        f"{name}: n={arr.size}, "
-        f"min={float(np.min(arr)):.4f}, "
-        f"p25={float(np.percentile(arr, 25)):.4f}, "
-        f"median={float(np.median(arr)):.4f}, "
-        f"p75={float(np.percentile(arr, 75)):.4f}, "
-        f"max={float(np.max(arr)):.4f}, "
-        f"mean={float(np.mean(arr)):.4f}"
-    )
-
-
-def plot_class_counts(title: str, class_counts: dict, out_path: Path):
-    if not class_counts:
-        return
-
-    names = list(class_counts.keys())
-    vals = [class_counts[k] for k in names]
-
-    plt.figure(figsize=(8, 4))
-    plt.bar(names, vals)
-    plt.title(title)
-    plt.ylabel("Count")
-    plt.xticks(rotation=30, ha="right")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
-
-
-def plot_hist(title: str, arr: np.ndarray, out_path: Path, bins=50, xlabel="Value"):
-    if arr.size == 0:
-        return
-    plt.figure(figsize=(8, 4))
-    plt.hist(arr, bins=bins)
-    plt.title(title)
-    plt.xlabel(xlabel)
-    plt.ylabel("Frequency")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
-
-
-def visualize_examples(coco: dict, img_dir: Path, out_dir: Path, max_images: int = 5, seed: int = 42):
-    """
-    Saves a few example images with GT bounding boxes drawn on top.
-    Expects: img_dir / im["file_name"] to exist.
-    """
-    if cv2 is None:
-        print("⚠️ OpenCV (cv2) bulunamadı. Örnek görseller çizilmeyecek. Kur: pip install opencv-python")
-        return
-
-    images = coco.get("images", [])
-    anns = coco.get("annotations", [])
-    cats = {c["id"]: c.get("name", str(c["id"])) for c in coco.get("categories", [])}
-
-    if not images:
-        return
-
-    img_id_to_anns = defaultdict(list)
-    for a in anns:
-        img_id_to_anns[a["image_id"]].append(a)
-
+def plot_spatial_heatmap(stats: dict, split: str, out_dir: Path):
+    """Generates a spatial heatmap for the entire split and per-class."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # All classes combined
+    all_coords = []
+    for cls_coords in stats["spatial_coords"].values():
+        all_coords.extend(cls_coords)
+    
+    if not all_coords:
+        return
 
-    rng = random.Random(seed)
-    samples = rng.sample(images, min(max_images, len(images)))
+    def create_heatmap(coords, title, filename):
+        coords = np.array(coords)
+        plt.figure(figsize=(8, 7))
+        h, xedges, yedges = np.histogram2d(coords[:, 0], coords[:, 1], bins=20, range=[[0, 1], [0, 1]])
+        extent = [xedges[0], xedges[-1], yedges[-1], yedges[0]]  # Flip Y for image coordinates
+        
+        plt.imshow(h.T, extent=extent, interpolation='gaussian', cmap='jet')
+        plt.colorbar(label='Density')
+        plt.title(f"{title} ({split})")
+        plt.xlabel("X (Normalized)")
+        plt.ylabel("Y (Normalized)")
+        plt.grid(alpha=0.3)
+        plt.savefig(out_dir / filename, dpi=150)
+        plt.close()
 
-    saved = 0
-    for im in samples:
-        file_name = im.get("file_name")
-        if not file_name:
-            continue
+    create_heatmap(all_coords, "Spatial Distribution - All Classes", f"spatial_heatmap_{split}_all.png")
+    
+    # Per class heatmap (top 4 if many)
+    for cls, coords in stats["spatial_coords"].items():
+        if len(coords) > 5:
+            create_heatmap(coords, f"Heatmap - {cls}", f"spatial_heatmap_{split}_{cls}.png")
 
-        img_path = img_dir / file_name
-        if not img_path.exists():
-            continue
 
-        img = cv2.imread(str(img_path))
-        if img is None:
-            continue
+def plot_split_comparison(all_reports: dict, out_dir: Path):
+    """Compares class distribution across splits."""
+    splits = list(all_reports.keys())
+    if not splits: return
+    
+    classes = all_reports[splits[0]]["categories"]
+    n_classes = len(classes)
+    n_splits = len(splits)
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    x = np.arange(n_classes)
+    width = 0.8 / n_splits
+    
+    for i, split in enumerate(splits):
+        counts = [all_reports[split]["class_counts"].get(cls, 0) for cls in classes]
+        ax.bar(x + i*width, counts, width, label=split)
+        
+    ax.set_ylabel('Annotations')
+    ax.set_title('Class Distribution Across Splits')
+    ax.set_xticks(x + width * (n_splits-1) / 2)
+    ax.set_xticklabels(classes, rotation=30, ha='right')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / "split_comparison.png", dpi=200)
+    plt.close()
 
-        for a in img_id_to_anns.get(im["id"], []):
-            x, y, w, h = a["bbox"]
-            x, y, w, h = int(x), int(y), int(w), int(h)
-            label = cats.get(a["category_id"], "unknown")
 
-            # rectangle
-            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+def generate_diagnostics(all_reports: dict) -> list:
+    """Analyzes the stats and provides 'Reis' advice."""
+    advice = []
+    
+    for split, stats in all_reports.items():
+        advice.append(f"--- {split.upper()} DIAGNOSTICS ---")
+        
+        # 1. Imbalance Check
+        counts = stats["class_counts"]
+        if counts:
+            max_c = max(counts.values())
+            min_c = min(counts.values())
+            if max_c > min_c * 5:
+                minority = [k for k, v in counts.items() if v == min_c][0]
+                advice.append(f"⚠️ Dengesizlik: {minority} sınıfı çok az ({min_c} adet). Model bu sınıfı öğrenmekte zorlanabilir.")
+        
+        # 2. Small target check
+        small_count = stats["size_categories"].get("Small", 0)
+        total_ann = stats["ann_count"]
+        if total_ann > 0:
+            small_ratio = small_count / total_ann
+            if small_ratio > 0.5:
+                advice.append(f"🔍 Küçük Hedef Yoğunluğu: Nesnelerin %{small_ratio*100:.1f}'i 'Small' kategorisinde. SAHI veya yüksek çözünürlüklü (800+) eğitim önerilir.")
 
-            # label background and text
-            text = str(label)
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            y0 = max(0, y - th - 8)
-            cv2.rectangle(img, (x, y0), (x + tw + 6, y0 + th + 6), (0, 255, 0), -1)
-            cv2.putText(img, text, (x + 3, y0 + th + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        # 3. Aspect ratio check
+        ars = np.array(stats["aspect_ratios"])
+        if ars.size > 0:
+            extreme = np.sum((ars > 3) | (ars < 0.33))
+            if extreme > total_ann * 0.1:
+                advice.append(f"📏 Ekstrem Oranlar: Nesnelerin %{extreme/total_ann*100:.1f}'i çok uzun veya çok geniş. 'YOLOv5RandomAffine' gibi augmentasyonlar kritik.")
 
-        out_path = out_dir / f"example_{Path(file_name).stem}_id{im['id']}.jpg"
-        cv2.imwrite(str(out_path), img)
-        saved += 1
-
-    print(f"🖼️ Örnek görseller kaydedildi: {out_dir} (saved={saved})")
+    return advice
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ann-dir", default="coco_annotations", help="COCO json klasörü (projeye göre relatif)")
-    ap.add_argument("--splits", nargs="+", default=["train", "validation", "test"],
-                    help="Analiz edilecek splitler: train validation test")
-    ap.add_argument("--out-dir", default="dataset_analysis", help="Rapor+grafik çıktı klasörü")
-
-    # NEW: image dir for example visualizations
-    ap.add_argument("--img-dir", default=None,
-                    help="Görsel kök klasörü. Eğer vermezsen örnek bbox çizimi atlanır. "
-                         "Örn: images veya data/images. Split alt klasörü varsa otomatik dener.")
-    ap.add_argument("--num-examples", type=int, default=5, help="Her split için çizilecek örnek görsel sayısı")
-    ap.add_argument("--seed", type=int, default=42, help="Random seed (örnek görsel seçimi için)")
+    ap = argparse.ArgumentParser(description="Advanced Dataset Analysis ('Reis' Upgrade)")
+    ap.add_argument("--ann-dir", default="coco_annotations", help="COCO json klasörü")
+    ap.add_argument("--splits", nargs="+", default=["train", "validation", "test"], help="Analiz edilecek splitler")
+    ap.add_argument("--out-dir", default="dataset_analysis", help="Çıktı klasörü")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
-
-    ann_dir = Path(args.ann_dir)
-    if not ann_dir.is_absolute():
-        ann_dir = repo_root / ann_dir
-
-    out_dir = Path(args.out_dir)
-    if not out_dir.is_absolute():
-        out_dir = repo_root / out_dir
+    ann_dir = repo_root / args.ann_dir
+    out_dir = repo_root / args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    img_dir_root = None
-    if args.img_dir is not None:
-        img_dir_root = Path(args.img_dir)
-        if not img_dir_root.is_absolute():
-            img_dir_root = repo_root / img_dir_root
 
     split_to_file = {
         "train": "instances_train.json",
@@ -232,110 +230,56 @@ def main():
     all_reports = {}
 
     for split in args.splits:
-        if split not in split_to_file:
-            raise ValueError(f"Split tanınmadı: {split}. Kullan: train/validation/test")
-
+        if split not in split_to_file: continue
+        
         json_path = ann_dir / split_to_file[split]
         if not json_path.exists():
-            raise FileNotFoundError(f"COCO json bulunamadı: {json_path}")
+            print(f"Skipping {split}, file not found: {json_path}")
+            continue
 
+        print(f"🚀 Analyzing {split}...")
         coco = load_coco(json_path)
         stats = coco_stats(coco)
         all_reports[split] = stats
+        
+        # Plots
+        plot_spatial_heatmap(stats, split, out_dir / "heatmaps")
+        
+        # Size categories bar plot
+        plt.figure(figsize=(8, 5))
+        scat = stats["size_categories"]
+        plt.bar(scat.keys(), scat.values(), color=['#FF9999', '#66B2FF', '#99FF99'])
+        plt.title(f"COCO Size Distribution - {split}")
+        plt.savefig(out_dir / f"size_dist_{split}.png")
+        plt.close()
 
-        print("\n" + "=" * 80)
-        print(f"SPLIT: {split}  |  FILE: {json_path.name}")
-        print("=" * 80)
-        print(f"Images: {stats['img_count']}")
-        print(f"Annotations (bboxes): {stats['ann_count']}")
+    # Comparison and Global Analysis
+    if all_reports:
+        plot_split_comparison(all_reports, out_dir)
+        
+        # Diagnostics
+        advice = generate_diagnostics(all_reports)
+        print("\n" + "!"*40)
+        print("REİS'İN TAVSİYELERİ (DIAGNOSTICS)")
+        print("!"*40)
+        for line in advice:
+            print(line)
+            
+        with open(out_dir / "diagnostics.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(advice))
 
-        # class distribution (annotation count)
-        print("\nClass counts (annotations):")
-        for k, v in sorted(stats["class_counts"].items(), key=lambda x: (-x[1], x[0])):
-            print(f"  - {k}: {v}")
+    # Save upgraded JSON (stripping huge lists for readability)
+    final_json = {}
+    for k, v in all_reports.items():
+        report = v.copy()
+        for huge_key in ["img_widths", "img_heights", "bbox_areas", "bbox_wh", "aspect_ratios", "rel_areas", "spatial_coords"]:
+            del report[huge_key]
+        final_json[k] = report
 
-        # images per class
-        print("\nImages per class (unique images containing that class):")
-        for k, v in sorted(stats["images_per_class"].items(), key=lambda x: (-x[1], x[0])):
-            print(f"  - {k}: {v}")
+    with open(out_dir / "dataset_analysis_report_v2.json", "w", encoding="utf-8") as f:
+        json.dump(final_json, f, indent=2)
 
-        # annotations per image
-        api = np.array(list(stats["ann_per_img"].values()), dtype=np.int32)
-        print("\nAnnotations per image:")
-        print(describe_arr("ann/img", api.astype(np.float32)))
-
-        # image size
-        if stats["img_widths"].size:
-            print("\nImage sizes:")
-            print(describe_arr("width", stats["img_widths"].astype(np.float32)))
-            print(describe_arr("height", stats["img_heights"].astype(np.float32)))
-
-        # bbox stats
-        if stats["bbox_wh"].shape[0]:
-            w = stats["bbox_wh"][:, 0]
-            h = stats["bbox_wh"][:, 1]
-            print("\nBBox sizes (pixels):")
-            print(describe_arr("bbox_w", w))
-            print(describe_arr("bbox_h", h))
-            print(describe_arr("bbox_area", stats["bbox_area"]))
-
-        if stats["bbox_rel_area"].size:
-            print("\nBBox relative area (bbox_area / image_area):")
-            print(describe_arr("bbox_rel_area", stats["bbox_rel_area"]))
-
-        # save plots
-        plot_class_counts(
-            title=f"Class counts (annotations) ({split})",
-            class_counts=stats["class_counts"],
-            out_path=out_dir / f"class_counts_{split}.png",
-        )
-        plot_class_counts(
-            title=f"Images per class ({split})",
-            class_counts=stats["images_per_class"],
-            out_path=out_dir / f"images_per_class_{split}.png",
-        )
-        plot_hist(
-            title=f"Annotations per image ({split})",
-            arr=api.astype(np.float32),
-            out_path=out_dir / f"ann_per_image_{split}.png",
-            bins=30,
-            xlabel="annotations per image",
-        )
-        plot_hist(
-            title=f"BBox area (pixels^2) ({split})",
-            arr=stats["bbox_area"],
-            out_path=out_dir / f"bbox_area_{split}.png",
-            bins=50,
-            xlabel="bbox area",
-        )
-        plot_hist(
-            title=f"BBox relative area ({split})",
-            arr=stats["bbox_rel_area"],
-            out_path=out_dir / f"bbox_rel_area_{split}.png",
-            bins=50,
-            xlabel="bbox_area / image_area",
-        )
-
-        # NEW: example visualizations
-        if img_dir_root is not None:
-            # Try both conventions:
-            # 1) img_dir_root/<split>
-            # 2) img_dir_root (flat)
-            cand1 = img_dir_root / split
-            img_dir = cand1 if cand1.exists() else img_dir_root
-
-            examples_dir = out_dir / f"examples_{split}"
-            visualize_examples(coco, img_dir=img_dir, out_dir=examples_dir,
-                               max_images=args.num_examples, seed=args.seed)
-
-    # Save JSON report
-    report_path = out_dir / "dataset_analysis_report.json"
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(all_reports, f, indent=2)
-
-    print("\n✅ Rapor ve grafikler kaydedildi:")
-    print(f"- {out_dir}")
-    print(f"- {report_path}")
+    print(f"\n✅ Analiz tamamlandı. Raporlar: {out_dir}")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ def parse_args():
     parser.add_argument("--tta", action="store_true", help="Evaluation sırasında test-time augmentation uygula")
     parser.add_argument("--seed", type=int, default=None, help="Tekrarlanabilirlik için global seed")
     parser.add_argument("--deterministic", action="store_true", help="Deterministic backend ayarları")
+    parser.add_argument("--fold", type=int, default=None, help="K-Fold eğitimindeki fold numarasını belirtir. Eğitimi ilgili fold json'ları ile başlatır.")
     return parser.parse_args()
 
 
@@ -59,7 +60,7 @@ def run_prepare_dataset(project_root: Path):
     subprocess.run(cmd, check=True)
 
 
-def patch_cfg_paths(cfg: Config, project_root: Path):
+def patch_cfg_paths(cfg: Config, project_root: Path, fold_idx: int = None):
     """
     Profesyonel yol yönetimi:
     - archive/dataset: Göreceli olarak proje dışındaki veri setini bulur.
@@ -88,20 +89,31 @@ def patch_cfg_paths(cfg: Config, project_root: Path):
         
         # Anotasyon dosya adını path ile birleştir
         # (Config içinde sadece dosya adı kalmıştı)
-        if mode == "train":
-            ds.ann_file = str(ann_dir / "instances_train.json")
-        elif mode == "val":
-            ds.ann_file = str(ann_dir / "instances_validation.json")
-        elif mode == "test":
-            ds.ann_file = str(ann_dir / "instances_test.json")
+        if fold_idx is not None:
+            if mode == "train":
+                ds.ann_file = str(ann_dir / f"fold_{fold_idx}_train.json")
+            elif mode == "val":
+                ds.ann_file = str(ann_dir / f"fold_{fold_idx}_val.json")
+            elif mode == "test":
+                ds.ann_file = str(ann_dir / "instances_test.json")
+        else:
+            if mode == "train":
+                ds.ann_file = str(ann_dir / "instances_train.json")
+            elif mode == "val":
+                ds.ann_file = str(ann_dir / "instances_validation.json")
+            elif mode == "test":
+                ds.ann_file = str(ann_dir / "instances_test.json")
 
     # 4. Evaluator (Değerlendirme) yollarını güncelle
     if hasattr(cfg, "val_evaluator"):
-        cfg.val_evaluator.ann_file = str(ann_dir / "instances_validation.json")
+        if fold_idx is not None:
+            cfg.val_evaluator.ann_file = str(ann_dir / f"fold_{fold_idx}_val.json")
+        else:
+            cfg.val_evaluator.ann_file = str(ann_dir / "instances_validation.json")
     if hasattr(cfg, "test_evaluator"):
         cfg.test_evaluator.ann_file = str(ann_dir / "instances_test.json")
 
-    print(f"[OK] Dinamik yol yamama tamamlandı. Resimler: {images_dir.name}")
+    print(f"[OK] Dinamik yol yamama tamamlandı. (Fold: {fold_idx}) Resimler: {images_dir.name}")
 
 
 def validate_dataset_consistency(cfg: Config):
@@ -274,7 +286,7 @@ def main():
     args = parse_args()
 
     # Proje kökü: jet_detection_project
-    project_root = Path(__file__).resolve().parents[2]  # .../codes/scripts -> parents[2] = project_root
+    project_root = Path(__file__).resolve().parents[2]  # .../mmdetection/scripts -> parents[2] = project_root
     print(f"[INFO] Project root: {project_root}")
 
     if args.prepare_coco:
@@ -292,7 +304,10 @@ def main():
     if args.work_dir is not None:
         cfg.work_dir = str(project_root / args.work_dir) if not Path(args.work_dir).is_absolute() else args.work_dir
     else:
-        cfg.work_dir = str(project_root / "work_dirs" / cfg_path.stem)
+        if args.fold is not None:
+            cfg.work_dir = str(project_root / "work_dirs" / cfg_path.stem / f"fold_{args.fold}")
+        else:
+            cfg.work_dir = str(project_root / "work_dirs" / cfg_path.stem)
 
     work_dir = Path(cfg.work_dir)
     mkdir_or_exist(cfg.work_dir)
@@ -303,7 +318,7 @@ def main():
         print(f"[INFO] randomness -> seed={args.seed}, deterministic={args.deterministic}")
 
     # path patch
-    patch_cfg_paths(cfg, project_root)
+    patch_cfg_paths(cfg, project_root, fold_idx=args.fold)
     validate_dataset_consistency(cfg)
 
     if args.evaluate and args.tta:
