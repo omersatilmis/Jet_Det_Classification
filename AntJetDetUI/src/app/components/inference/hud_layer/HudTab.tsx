@@ -4,8 +4,37 @@ import { Target } from "lucide-react";
 import { ModelData } from "../../hud-data";
 import { SectionLabel, DataRow, NoDataMsg } from "../shared";
 
-export function HudTab({ model, isAnalyzed }: { model: ModelData; isAnalyzed: boolean }) {
-    const det = model.detections[0];
+export function HudTab({
+    model,
+    isAnalyzed,
+    currentVideoTimeMs,
+}: {
+    model: ModelData;
+    isAnalyzed: boolean;
+    currentVideoTimeMs?: number | null;
+}) {
+    const getBestDetection = () => {
+        const detections = [...(model.detections || [])].sort((a, b) => b.confidence - a.confidence);
+        return detections[0];
+    };
+
+    const getVideoDetection = () => {
+        const frames = model.videoFrames || [];
+        if (!frames.length || currentVideoTimeMs == null) return null;
+        let nearest = frames[0];
+        let minDiff = Math.abs(frames[0].timestamp_ms - currentVideoTimeMs);
+        for (let i = 1; i < frames.length; i += 1) {
+            const diff = Math.abs(frames[i].timestamp_ms - currentVideoTimeMs);
+            if (diff < minDiff) {
+                minDiff = diff;
+                nearest = frames[i];
+            }
+        }
+        const sorted = [...nearest.detections].sort((a, b) => b.confidence - a.confidence);
+        return sorted[0] || null;
+    };
+
+    const det = model.videoFrames && model.videoFrames.length > 0 ? getVideoDetection() : getBestDetection();
     return (
         <div
             className="space-y-3"

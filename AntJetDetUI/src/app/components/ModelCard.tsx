@@ -34,6 +34,7 @@ interface ModelCardProps {
   canAnalyze: boolean;
   onAnalyze: () => void;
   imageUrl?: string | null;
+  currentVideoTimeMs?: number | null;
   onRemove?: () => void;
 }
 
@@ -56,6 +57,7 @@ export function ModelCard({
   canAnalyze,
   onAnalyze,
   imageUrl,
+  currentVideoTimeMs,
   onRemove,
 }: ModelCardProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen ?? false);
@@ -230,7 +232,7 @@ export function ModelCard({
               {/* Tab content */}
               <div className="p-4">
                 {activeTab === "hud" && (
-                  <HudTab model={model} isAnalyzed={isAnalyzed} />
+                  <HudTab model={model} isAnalyzed={isAnalyzed} currentVideoTimeMs={currentVideoTimeMs} />
                 )}
                 {activeTab === "perf" && (
                   <PerfTab model={model} isAnalyzed={isAnalyzed} />

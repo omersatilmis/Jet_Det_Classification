@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from "react";
+import React, { useState, useRef, useCallback, useEffect } from "react";
 import { Upload, Crosshair, ZoomIn, Target, Lock } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { ModelData } from "./hud-data";
@@ -9,8 +9,11 @@ const JET_IMAGE =
 interface LeftPanelProps {
   activeModels: ModelData[];
   imageUrl: string | null;
+  videoUrl?: string | null;
+  mediaType?: "image" | "video" | null;
   isAnalyzing: boolean;
-  onLoadImage: () => void;
+  onLoadMedia: (file?: File) => void;
+  onVideoTimeUpdate?: (timeMs: number | null) => void;
   selectedFile?: File | null;
   progress?: number;
 }
@@ -18,14 +21,147 @@ interface LeftPanelProps {
 export function LeftPanel({
   activeModels,
   imageUrl,
+  videoUrl,
+  mediaType,
   isAnalyzing,
-  onLoadImage,
+  onLoadMedia,
+  onVideoTimeUpdate,
   selectedFile,
   progress,
 }: LeftPanelProps) {
   const [isDragOver, setIsDragOver] = useState(false);
   const [scanLine, setScanLine] = useState(0);
   const scanRef = useRef<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const imageContainerRef = useRef<HTMLDivElement | null>(null);
+  const [imageNatural, setImageNatural] = useState<{ w: number; h: number } | null>(null);
+  const [containerSize, setContainerSize] = useState<{ w: number; h: number } | null>(null);
+
+  useEffect(() => {
+    const el = imageContainerRef.current;
+    if (!el) return;
+
+    const updateSize = () => {
+      const rect = el.getBoundingClientRect();
+      setContainerSize({ w: Math.max(1, rect.width), h: Math.max(1, rect.height) });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => updateSize());
+      observer.observe(el);
+      return () => observer.disconnect();
+    }
+
+    window.addEventListener("resize", updateSize);
+    return () => window.removeEventListener("resize", updateSize);
+  }, [imageUrl]);
+
+  useEffect(() => {
+    if (mediaType !== "video" || !videoUrl) return;
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let rafId: number | null = null;
+
+    const drawFrame = () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        rafId = requestAnimationFrame(drawFrame);
+        return;
+      }
+
+      const rect = video.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
+      ctx.clearRect(0, 0, width, height);
+
+      const nowMs = video.currentTime * 1000.0;
+      const videoW = video.videoWidth || 1;
+      const videoH = video.videoHeight || 1;
+      const scale = Math.min(width / videoW, height / videoH);
+      const drawW = videoW * scale;
+      const drawH = videoH * scale;
+      const offsetX = (width - drawW) / 2;
+      const offsetY = (height - drawH) / 2;
+
+      activeModels.forEach((model) => {
+        const frames = model.videoFrames || [];
+        if (!frames.length) return;
+
+        let nearest = frames[0];
+        let minDiff = Math.abs(frames[0].timestamp_ms - nowMs);
+        for (let i = 1; i < frames.length; i += 1) {
+          const diff = Math.abs(frames[i].timestamp_ms - nowMs);
+          if (diff < minDiff) {
+            minDiff = diff;
+            nearest = frames[i];
+          }
+        }
+
+        nearest.detections.forEach((det) => {
+          const [x, y, w, h] = det.bbox;
+          const bx = offsetX + (x * drawW);
+          const by = offsetY + (y * drawH);
+          const bw = w * drawW;
+          const bh = h * drawH;
+
+          ctx.strokeStyle = model.color;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(bx, by, bw, bh);
+
+          const label = `${model.shortName} ${det.label} ${(det.confidence * 100).toFixed(1)}%`;
+          ctx.fillStyle = model.color;
+          ctx.font = "10px Share Tech Mono";
+          const textWidth = ctx.measureText(label).width;
+          ctx.fillRect(bx, Math.max(0, by - 14), textWidth + 6, 12);
+          ctx.fillStyle = "#050c14";
+          ctx.fillText(label, bx + 3, Math.max(10, by - 4));
+        });
+      });
+
+      rafId = requestAnimationFrame(drawFrame);
+    };
+
+    rafId = requestAnimationFrame(drawFrame);
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [activeModels, mediaType, videoUrl]);
+
+  useEffect(() => {
+    if (!onVideoTimeUpdate) return;
+    if (mediaType !== "video") {
+      onVideoTimeUpdate(null);
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handler = () => {
+      onVideoTimeUpdate(video.currentTime * 1000.0);
+    };
+
+    video.addEventListener("timeupdate", handler);
+    video.addEventListener("loadedmetadata", handler);
+    return () => {
+      video.removeEventListener("timeupdate", handler);
+      video.removeEventListener("loadedmetadata", handler);
+    };
+  }, [mediaType, onVideoTimeUpdate, videoUrl]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -36,9 +172,14 @@ export function LeftPanel({
     (e: React.DragEvent) => {
       e.preventDefault();
       setIsDragOver(false);
-      onLoadImage();
+      const file = e.dataTransfer.files?.[0];
+      if (file) {
+        onLoadMedia(file);
+      } else {
+        onLoadMedia();
+      }
     },
-    [onLoadImage]
+    [onLoadMedia]
   );
 
   return (
@@ -88,9 +229,9 @@ export function LeftPanel({
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          onClick={!imageUrl ? onLoadImage : undefined}
+          onClick={!imageUrl && !videoUrl ? () => onLoadMedia() : undefined}
         >
-          {!imageUrl ? (
+          {!imageUrl && !videoUrl ? (
             /* Empty state */
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
               <motion.div
@@ -130,12 +271,36 @@ export function LeftPanel({
           ) : (
             /* Image loaded with HUD overlay */
             <>
-              <img
-                src={imageUrl}
-                alt="Aircraft detection target"
-                className="w-full h-full object-cover"
-                style={{ filter: "brightness(0.85) saturate(0.9)" }}
-              />
+              {mediaType === "video" ? (
+                <>
+                  <video
+                    ref={videoRef}
+                    src={videoUrl || undefined}
+                    className="w-full h-full object-contain"
+                    style={{ filter: "brightness(0.85) saturate(0.9)" }}
+                    controls
+                    muted
+                  />
+                  <canvas
+                    ref={canvasRef}
+                    className="absolute inset-0 pointer-events-none"
+                  />
+                </>
+              ) : (
+                <div ref={imageContainerRef} className="absolute inset-0">
+                  <img
+                    ref={imageRef}
+                    src={imageUrl || undefined}
+                    alt="Aircraft detection target"
+                    className="w-full h-full object-contain"
+                    style={{ filter: "brightness(0.85) saturate(0.9)" }}
+                    onLoad={(e) => {
+                      const img = e.currentTarget;
+                      setImageNatural({ w: img.naturalWidth || 1, h: img.naturalHeight || 1 });
+                    }}
+                  />
+                </div>
+              )}
 
               {/* CRT scanline overlay */}
               <div
@@ -171,8 +336,14 @@ export function LeftPanel({
               )}
 
               {/* Bounding boxes for each active model */}
-              {activeModels.map((model) =>
-                model.detections.map((det, i) => (
+              {mediaType !== "video" && imageNatural && containerSize && activeModels.map((model) => {
+                const scale = Math.min(containerSize.w / imageNatural.w, containerSize.h / imageNatural.h);
+                const drawW = imageNatural.w * scale;
+                const drawH = imageNatural.h * scale;
+                const offsetX = (containerSize.w - drawW) / 2;
+                const offsetY = (containerSize.h - drawH) / 2;
+
+                return model.detections.map((det, i) => (
                   <BoundingBox
                     key={`${model.id}-${i}`}
                     detection={det}
@@ -180,9 +351,15 @@ export function LeftPanel({
                     modelName={model.shortName}
                     isFirst={i === 0}
                     isAnalyzing={isAnalyzing}
+                    pixelBox={{
+                      x: offsetX + det.bbox[0] * drawW,
+                      y: offsetY + det.bbox[1] * drawH,
+                      w: det.bbox[2] * drawW,
+                      h: det.bbox[3] * drawH,
+                    }}
                   />
-                ))
-              )}
+                ));
+              })}
 
               {/* HUD corner info */}
               <div className="absolute top-2 left-2" style={{ color: "#00FF41", fontSize: "9px" }}>
@@ -219,7 +396,7 @@ export function LeftPanel({
         style={{ borderTop: "1px solid #0a1f2e" }}
       >
         <button
-          onClick={onLoadImage}
+          onClick={() => onLoadMedia()}
           className="w-full flex items-center justify-center gap-3 py-3 rounded transition-all duration-300 relative overflow-hidden group"
           style={{
             background: imageUrl
@@ -240,7 +417,7 @@ export function LeftPanel({
             }}
           />
           <Upload size={14} />
-          <span>{imageUrl ? "YENİ MEDYA YÜKLE" : "DOSYA EKLE"}</span>
+          <span>{imageUrl || videoUrl ? "YENİ MEDYA YÜKLE" : "DOSYA EKLE"}</span>
         </button>
       </div>
     </div>
@@ -253,6 +430,7 @@ function BoundingBox({
   modelName,
   isFirst,
   isAnalyzing,
+  pixelBox,
 }: {
   detection: {
     label: string;
@@ -264,16 +442,21 @@ function BoundingBox({
   modelName: string;
   isFirst: boolean;
   isAnalyzing: boolean;
+  pixelBox?: { x: number; y: number; w: number; h: number };
 }) {
   const [x, y, w, h] = detection.bbox;
+  const left = pixelBox ? `${pixelBox.x}px` : `${x * 100}%`;
+  const top = pixelBox ? `${pixelBox.y}px` : `${y * 100}%`;
+  const width = pixelBox ? `${pixelBox.w}px` : `${w * 100}%`;
+  const height = pixelBox ? `${pixelBox.h}px` : `${h * 100}%`;
   return (
     <div
       className="absolute pointer-events-none"
       style={{
-        left: `${x * 100}%`,
-        top: `${y * 100}%`,
-        width: `${w * 100}%`,
-        height: `${h * 100}%`,
+        left,
+        top,
+        width,
+        height,
       }}
     >
       {/* Box border */}

@@ -20,6 +20,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from typing import List
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +103,9 @@ def build_confusion_data(model, dataset, class_names, score_thr, iou_thr, device
 
     fp_examples = []
     fn_examples = []
+    iou_sum = 0.0
+    iou_count = 0
+    records = []
 
     for idx in range(len(dataset)):
         data_info = dataset.get_data_info(idx)
@@ -122,6 +126,15 @@ def build_confusion_data(model, dataset, class_names, score_thr, iou_thr, device
         pred_labels = pred_instances.labels[keep].cpu().numpy()
         pred_scores = pred_instances.scores[keep].cpu().numpy()
 
+        # Record raw preds/gt for PR curve
+        records.append(dict(
+            gt_boxes=gt_boxes,
+            gt_labels=gt_labels,
+            pred_boxes=pred_boxes,
+            pred_labels=pred_labels,
+            pred_scores=pred_scores,
+        ))
+
         # Match
         for pi, (pb, pl, ps) in enumerate(zip(pred_boxes, pred_labels, pred_scores)):
             best_iou = 0
@@ -137,6 +150,8 @@ def build_confusion_data(model, dataset, class_names, score_thr, iou_thr, device
             if best_iou >= iou_thr and best_gi >= 0:
                 gt_matched[best_gi] = True
                 confusion[int(pl)][gt_labels[best_gi]] += 1
+                iou_sum += float(best_iou)
+                iou_count += 1
                 if int(pl) != gt_labels[best_gi] and len(fp_examples) < 50:
                     fp_examples.append(dict(img=img_path, pred=int(pl),
                                             gt=gt_labels[best_gi], score=float(ps)))
@@ -156,7 +171,61 @@ def build_confusion_data(model, dataset, class_names, score_thr, iou_thr, device
         if (idx + 1) % 100 == 0:
             print(f"  [{idx+1}/{len(dataset)}] confusion matrix hesaplanıyor...")
 
-    return confusion, fp_examples, fn_examples
+    avg_iou = (iou_sum / iou_count) if iou_count > 0 else 0.0
+    return confusion, fp_examples, fn_examples, avg_iou, records
+
+
+def compute_pr_curve(records, iou_thr: float, thresholds: List[float]):
+    total_gt = sum(len(r["gt_boxes"]) for r in records)
+    curve = []
+
+    for thr in thresholds:
+        tp = 0
+        fp = 0
+        fn = 0
+
+        for r in records:
+            gt_boxes = r["gt_boxes"]
+            gt_labels = r["gt_labels"]
+            pred_boxes = r["pred_boxes"]
+            pred_labels = r["pred_labels"]
+            pred_scores = r["pred_scores"]
+
+            keep = pred_scores >= thr
+            p_boxes = pred_boxes[keep]
+            p_labels = pred_labels[keep]
+            p_scores = pred_scores[keep]
+
+            order = p_scores.argsort()[::-1]
+            p_boxes = p_boxes[order]
+            p_labels = p_labels[order]
+
+            matched = [False] * len(gt_boxes)
+
+            for pb, pl in zip(p_boxes, p_labels):
+                best_iou = 0
+                best_gi = -1
+                for gi, (gb, gl) in enumerate(zip(gt_boxes, gt_labels)):
+                    if matched[gi] or int(pl) != int(gl):
+                        continue
+                    iou = compute_iou(pb, gb)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_gi = gi
+
+                if best_iou >= iou_thr and best_gi >= 0:
+                    matched[best_gi] = True
+                    tp += 1
+                else:
+                    fp += 1
+
+            fn += matched.count(False)
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        curve.append(dict(recall=round(recall, 4), precision=round(precision, 4)))
+
+    return curve
 
 
 def plot_confusion_matrix(confusion, class_names, out_path):
@@ -352,7 +421,7 @@ def main():
 
     print(f"  Dataset yüklendi: {len(dataset)} görsel ({args.split})")
 
-    confusion, fp_examples, fn_examples = build_confusion_data(
+    confusion, fp_examples, fn_examples, avg_iou, records = build_confusion_data(
         model, dataset, class_names, args.score_thr, args.iou_thr, args.device
     )
 
@@ -391,6 +460,18 @@ def main():
                        false_negatives=fn_examples[:args.max_vis]),
                   f, indent=2, ensure_ascii=False, default=str)
     print(f"  → Hatalı örnek listesi: {errors_path}")
+
+    avg_iou_path = out_dir / "avg_iou.json"
+    with open(avg_iou_path, "w", encoding="utf-8") as f:
+        json.dump({"avg_iou": round(avg_iou, 6)}, f, indent=2, ensure_ascii=False)
+    print(f"  → Ortalama IoU: {avg_iou_path}")
+
+    thresholds = [round(x, 2) for x in np.linspace(0.05, 0.95, 19)]
+    pr_curve = compute_pr_curve(records, args.iou_thr, thresholds)
+    pr_curve_path = out_dir / "pr_curve.json"
+    with open(pr_curve_path, "w", encoding="utf-8") as f:
+        json.dump(pr_curve, f, indent=2, ensure_ascii=False)
+    print(f"  → PR curve: {pr_curve_path}")
 
     # ========== BÖLÜM 3: Özet ==========
     print("\n" + "=" * 70)

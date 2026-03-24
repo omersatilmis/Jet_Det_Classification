@@ -13,6 +13,7 @@ interface RightPanelProps {
   onAnalyze: (modelId: string) => void;
   canAnalyze: boolean;
   imageUrl: string | null;
+  currentVideoTimeMs: number | null;
 }
 
 export function RightPanel({
@@ -23,6 +24,7 @@ export function RightPanel({
   onAnalyze,
   canAnalyze,
   imageUrl,
+  currentVideoTimeMs,
 }: RightPanelProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [dynamicOptions, setDynamicOptions] = useState(MODEL_OPTIONS);
@@ -62,6 +64,7 @@ export function RightPanel({
             prCurve: [],
             ioU: 0,
             consensusScore: 0,
+            videoFrames: [],
           };
         }
       });
@@ -110,7 +113,7 @@ export function RightPanel({
               letterSpacing: "0.2em",
             }}
           >
-            MODEL YÖNETİM PANELI
+            MODEL YÖNETİM PANELİ
           </span>
         </div>
         <div
@@ -449,6 +452,7 @@ export function RightPanel({
                     canAnalyze={canAnalyze && !analyzingModels.has(model.id)}
                     onAnalyze={() => onAnalyze(model.id)}
                     imageUrl={imageUrl}
+                    currentVideoTimeMs={currentVideoTimeMs}
                     onRemove={() => removeModel(model.id)}
                   />
                 </div>
