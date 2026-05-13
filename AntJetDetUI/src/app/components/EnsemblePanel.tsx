@@ -10,55 +10,62 @@ import {
   Cell,
 } from "recharts";
 import { motion, AnimatePresence } from "motion/react";
-import { ENSEMBLE_DATA, ModelData } from "./hud-data";
+import { ModelData } from "./hud-data";
 
 interface EnsemblePanelProps {
   activeModels: ModelData[];
   isAnalyzed: boolean;
+  ensembleResult?: any;
 }
 
-export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) {
+export function EnsemblePanel({ activeModels, isAnalyzed, ensembleResult }: EnsemblePanelProps) {
   const [expanded, setExpanded] = useState(true);
 
   const hasMultiple = activeModels.length > 1;
 
-  const radarData = [
-    {
-      subject: "mAP",
-      "Cascade R-CNN": 89.4,
-      YOLOv11: 86.2,
-      "Custom Model": 91.8,
-      WBF: 93.1,
-    },
-    {
-      subject: "IoU",
-      "Cascade R-CNN": 84.7,
-      YOLOv11: 81.2,
-      "Custom Model": 87.3,
-      WBF: 86.1,
-    },
-    {
-      subject: "Speed",
-      "Cascade R-CNN": 35,
-      YOLOv11: 95,
-      "Custom Model": 60,
-      WBF: 50,
-    },
-    {
-      subject: "P_conf",
-      "Cascade R-CNN": 95.3,
-      YOLOv11: 91.7,
-      "Custom Model": 97.1,
-      WBF: 94.7,
-    },
-    {
-      subject: "Consensus",
-      "Cascade R-CNN": 91,
-      YOLOv11: 87,
-      "Custom Model": 94,
-      WBF: 100,
-    },
+  // Calculate averages from backend metrics when available
+  const analyzedModels = activeModels.filter(m => m.inferenceTime > 0);
+  const fallbackAvgInference = analyzedModels.length > 0
+    ? (analyzedModels.reduce((acc, m) => acc + m.inferenceTime, 0) / analyzedModels.length)
+    : 0;
+  const fallbackAvgFps = analyzedModels.length > 0
+    ? (analyzedModels.reduce((acc, m) => acc + m.fps, 0) / analyzedModels.length)
+    : 0;
+  const fallbackAvgGpu = analyzedModels.length > 0
+    ? (analyzedModels.reduce((acc, m) => acc + (m.gpuUsage || 0), 0) / analyzedModels.length)
+    : 0;
+  const fallbackAvgVram = analyzedModels.length > 0
+    ? (analyzedModels.reduce((acc, m) => acc + (m.vramUsage || 0), 0) / analyzedModels.length)
+    : 0;
+
+  const ensembleMetrics = ensembleResult?.metrics;
+  const avgInference = (ensembleMetrics?.avg_inference_time_ms ?? fallbackAvgInference).toFixed(1);
+  const avgFps = (ensembleMetrics?.avg_fps ?? fallbackAvgFps).toFixed(1);
+  const avgGpu = (ensembleMetrics?.avg_gpu_usage ?? fallbackAvgGpu).toFixed(1);
+  const avgVram = (ensembleMetrics?.avg_vram_usage_mb != null
+    ? (ensembleMetrics.avg_vram_usage_mb / 1024.0)
+    : fallbackAvgVram).toFixed(1);
+
+  // Prepare comparison data for chart and table
+  const comparisonData = [
+    ...activeModels.map(m => ({
+      model: m.shortName,
+      mAP: m.mAP && m.mAP > 0 ? m.mAP : null,
+      ioU: m.ioU && m.ioU > 0 ? m.ioU : null,
+      fps: m.fps || 0,
+      color: m.color
+    })),
+    ...(isAnalyzed && hasMultiple ? [{
+      model: "WBF Ensemble",
+      mAP: ensembleMetrics?.avg_map ?? null,
+      ioU: ensembleMetrics?.avg_iou ?? null,
+      fps: parseFloat(avgFps),
+      color: "#00E5FF"
+    }] : [])
   ];
+
+  // Get primary ensemble detection
+  const primaryEnsemble = ensembleResult?.detections?.[0];
 
   return (
     <div
@@ -68,7 +75,6 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
         fontFamily: "'Share Tech Mono', monospace",
       }}
     >
-      {/* Section header (always visible) */}
       <button
         className="w-full flex items-center justify-between px-6 py-3"
         style={{ borderBottom: expanded ? "1px solid #0d2030" : "none" }}
@@ -93,7 +99,7 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                 className="ml-4"
                 style={{ color: "#3a6a5a", fontSize: "9px" }}
               >
-                WBF · {activeModels.length} MODEL · mAP: 93.1%
+                WBF · {activeModels.length} MODEL · AVG LATENCY: {avgInference}ms
               </span>
             )}
           </div>
@@ -109,21 +115,7 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
             >
               <CheckCircle size={12} style={{ color: "#00FF41" }} />
               <span style={{ color: "#00FF41", fontSize: "9px", letterSpacing: "0.15em" }}>
-                CONSENSUS ACHIEVED
-              </span>
-            </div>
-          )}
-          {isAnalyzed && !hasMultiple && (
-            <div
-              className="flex items-center gap-2 px-3 py-1 rounded"
-              style={{
-                background: "rgba(255,140,0,0.08)",
-                border: "1px solid rgba(255,140,0,0.25)",
-              }}
-            >
-              <AlertTriangle size={12} style={{ color: "#FF8C00" }} />
-              <span style={{ color: "#FF8C00", fontSize: "9px", letterSpacing: "0.15em" }}>
-                ENSEMBLE İÇİN EN AZ 2 MODEL GEREKLİ
+                CONSENSUS ACHIEVED ({(ensembleResult?.metrics?.consensus_score * 100 || 0).toFixed(0)}%)
               </span>
             </div>
           )}
@@ -135,7 +127,6 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
         </div>
       </button>
 
-      {/* Expanded content */}
       <AnimatePresence>
         {expanded && (
           <motion.div
@@ -151,11 +142,10 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                   className="text-center py-4"
                   style={{ color: "#1a3a4a", fontSize: "10px", letterSpacing: "0.3em" }}
                 >
-                  — GÖRSEL ANALİZİ BEKLENIYOR — ENSEMBLe VERİSİ MEVCUT DEĞİL —
+                  — GÖRSEL ANALİZİ BEKLENIYOR — ENSEMBLE VERİSİ MEVCUT DEĞİL —
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-6" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
-                  {/* WBF Result */}
                   <div className="space-y-3">
                     <SectionLabel color="#00E5FF">
                       WBF ORTALAMA TESPİT ÇIKTISI
@@ -184,48 +174,45 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                             letterSpacing: "0.1em",
                           }}
                         >
-                          {ENSEMBLE_DATA.finalLabel.toUpperCase()}
+                          {primaryEnsemble?.class_name?.toUpperCase() || "JET-DET-CONSENSUS"}
                         </span>
                       </div>
                       <DataRow
                         label="P_conf (WBF)"
-                        value={`${(ENSEMBLE_DATA.finalConfidence * 100).toFixed(2)}%`}
+                        value={`${(primaryEnsemble?.confidence * 100 || 0).toFixed(2)}%`}
                         color="#00FF41"
                         highlight
                       />
                       <DataRow
                         label="WBF BBox (x,y,w,h)"
-                        value={`(${ENSEMBLE_DATA.wbfBbox
-                          .map((v) => (v * 1000).toFixed(0))
-                          .join(", ")})`}
+                        value={primaryEnsemble ? `(${primaryEnsemble.box.x.toFixed(2)}, ${primaryEnsemble.box.y.toFixed(2)}, ${primaryEnsemble.box.width.toFixed(2)}, ${primaryEnsemble.box.height.toFixed(2)})` : "N/A"}
                         color="#00E5FF"
                       />
                       <DataRow
                         label="Model Anlaşması"
-                        value={`${(ENSEMBLE_DATA.modelAgreement * 100).toFixed(0)}%`}
+                        value={`${((primaryEnsemble as any)?.agreement || 0) * 100}%`}
                         color="#00FF41"
                       />
                       <DataRow
-                        label="WBF IoU"
-                        value={ENSEMBLE_DATA.wbfIoU.toFixed(3)}
-                        color="#00E5FF"
+                        label="Ort. Çıkarım Süresi"
+                        value={`${avgInference} ms`}
+                        color="#FF8C00"
                       />
                       <DataRow
-                        label="Ort. Çıkarım Süresi"
-                        value={`${ENSEMBLE_DATA.avgInference} ms`}
-                        color="#FF8C00"
+                        label="Sistem VRAM (Avg)"
+                        value={`${avgVram} GB`}
+                        color="#FF3366"
                       />
                     </div>
                   </div>
 
-                  {/* Comparison bar chart */}
                   <div className="space-y-3">
                     <SectionLabel color="#00E5FF">
                       KARAR DESTEK GRAFİĞİ — mAP KARŞILAŞTIRMA
                     </SectionLabel>
                     <ResponsiveContainer width="100%" height={180}>
                       <BarChart
-                        data={ENSEMBLE_DATA.comparisonTable}
+                        data={comparisonData}
                         margin={{ top: 4, right: 4, left: -16, bottom: 4 }}
                         barCategoryGap="30%"
                       >
@@ -240,7 +227,7 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                           axisLine={{ stroke: "#0d2030" }}
                         />
                         <YAxis
-                          domain={[75, 100]}
+                          domain={[0, 100]}
                           tick={{
                             fill: "#2a4a6a",
                             fontSize: 7,
@@ -257,21 +244,13 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                             fontFamily: "Share Tech Mono",
                             color: "#00E5FF",
                           }}
-                          formatter={(v) => [`${v}%`, "mAP"]}
+                          formatter={(v: any) => [v > 0 ? `${v}%` : "N/A", "mAP"]}
                         />
                         <Bar dataKey="mAP" radius={[2, 2, 0, 0]}>
-                          {ENSEMBLE_DATA.comparisonTable.map((entry, i) => (
+                          {comparisonData.map((entry, i) => (
                             <Cell
                               key={i}
-                              fill={
-                                entry.model === "WBF Ensemble"
-                                  ? "#00E5FF"
-                                  : i === 0
-                                  ? "#00FF41"
-                                  : i === 1
-                                  ? "#00E5FF"
-                                  : "#FF8C00"
-                              }
+                              fill={entry.color}
                               opacity={entry.model === "WBF Ensemble" ? 1 : 0.7}
                             />
                           ))}
@@ -280,7 +259,6 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                     </ResponsiveContainer>
                   </div>
 
-                  {/* Comparison table */}
                   <div className="space-y-3">
                     <SectionLabel color="#00E5FF">
                       HATA PAYI KARŞILAŞTIRMA TABLOSU
@@ -289,7 +267,6 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                       className="rounded overflow-hidden"
                       style={{ border: "1px solid #0d2030" }}
                     >
-                      {/* Table header */}
                       <div
                         className="grid text-center"
                         style={{
@@ -304,19 +281,12 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                       >
                         <div className="text-left">MODEL</div>
                         <div>mAP%</div>
-                        <div>IoU</div>
+                        <div>AP50</div>
                         <div>FPS</div>
                       </div>
 
-                      {ENSEMBLE_DATA.comparisonTable.map((row, i) => {
+                      {comparisonData.map((row, i) => {
                         const isEnsemble = row.model === "WBF Ensemble";
-                        const rowColor = isEnsemble
-                          ? "#00E5FF"
-                          : i === 0
-                          ? "#00FF41"
-                          : i === 1
-                          ? "#00E5FF"
-                          : "#FF8C00";
                         return (
                           <div
                             key={i}
@@ -329,7 +299,7 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                                 ? "rgba(0,229,255,0.06)"
                                 : "transparent",
                               borderBottom:
-                                i < ENSEMBLE_DATA.comparisonTable.length - 1
+                                i < comparisonData.length - 1
                                   ? "1px solid #080f1a"
                                   : "none",
                               fontFamily: "'Share Tech Mono', monospace",
@@ -337,29 +307,23 @@ export function EnsemblePanel({ activeModels, isAnalyzed }: EnsemblePanelProps) 
                           >
                             <div
                               className="text-left flex items-center gap-1"
-                              style={{ color: rowColor }}
+                              style={{ color: row.color }}
                             >
                               <div
                                 className="w-1.5 h-1.5 rounded-full"
-                                style={{ background: rowColor, flexShrink: 0 }}
+                                style={{ background: row.color, flexShrink: 0 }}
                               />
                               <span>{row.model}</span>
                             </div>
-                            <div style={{ color: "#e0f4ff" }}>{row.mAP}</div>
-                            <div style={{ color: "#e0f4ff" }}>{row.ioU}</div>
+                            <div style={{ color: "#e0f4ff" }}>{row.mAP ? row.mAP.toFixed(1) : "—"}</div>
+                            <div style={{ color: "#e0f4ff" }}>{row.ioU ? row.ioU.toFixed(2) : "—"}</div>
                             <div
                               style={{
                                 color:
-                                  typeof row.fps === "number" && row.fps > 30
-                                    ? "#00FF41"
-                                    : typeof row.fps === "number" && row.fps > 10
-                                    ? "#FF8C00"
-                                    : "#e0f4ff",
+                                  row.fps > 30 ? "#00FF41" : row.fps > 10 ? "#FF8C00" : "#e0f4ff",
                               }}
                             >
-                              {typeof row.fps === "number"
-                                ? row.fps.toFixed(1)
-                                : row.fps}
+                              {row.fps.toFixed(1)}
                             </div>
                           </div>
                         );

@@ -18,7 +18,7 @@ import time
 import random
 import asyncio
 
-from inference import run_inference, init_cascade_rcnn_r50
+from inference import run_inference, run_video_inference, init_cascade_rcnn_r50
 from model_registry import load_models, save_models
 
 import traceback
@@ -40,6 +40,33 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 dynamic_models = load_models()
 
+EVAL_METRICS_FILE = "eval_metrics.json"
+_eval_metrics_cache = {}
+_eval_metrics_mtime = 0.0
+
+def load_eval_metrics():
+    if not os.path.exists(EVAL_METRICS_FILE):
+        return {}
+    try:
+        import json
+        with open(EVAL_METRICS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[ERROR] Could not load {EVAL_METRICS_FILE}: {e}")
+        return {}
+
+def get_eval_metrics():
+    global _eval_metrics_cache, _eval_metrics_mtime
+    try:
+        mtime = os.path.getmtime(EVAL_METRICS_FILE)
+    except Exception:
+        mtime = 0.0
+
+    if mtime != _eval_metrics_mtime:
+        _eval_metrics_cache = load_eval_metrics()
+        _eval_metrics_mtime = mtime
+    return _eval_metrics_cache
+
 @app.on_event("startup")
 async def startup_event():
     print("[INFO] Starting up API and preemptively loading AI models to VRAM...")
@@ -47,10 +74,21 @@ async def startup_event():
     init_cascade_rcnn_r50()
 
 # Allow CORS for local development with Vite
+cors_env = os.environ.get("CORS_ORIGINS")
+if cors_env:
+    cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+else:
+    cors_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this to the frontend URL
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -74,6 +112,18 @@ class ModelMetrics(BaseModel):
     fps: Optional[float] = None
     gpu_usage: Optional[float] = None
     vram_usage_mb: Optional[float] = None
+    map: Optional[float] = None
+    iou: Optional[float] = None
+
+
+class PRPoint(BaseModel):
+    recall: float
+    precision: float
+
+
+class VideoFrameDetections(BaseModel):
+    timestamp_ms: float
+    detections: List[Detection]
 
 class ModelResult(BaseModel):
     model_id: str
@@ -82,11 +132,19 @@ class ModelResult(BaseModel):
     visualized_image: Optional[str] = None
     heatmap_image: Optional[str] = None
     metrics: ModelMetrics
+    frame_detections: Optional[List[VideoFrameDetections]] = None
+    pr_curve: Optional[List[PRPoint]] = None
 
 class EnsembleMetrics(BaseModel):
     consensus_score: float
     iou_threshold: float
     sigma: float
+    avg_inference_time_ms: Optional[float] = None
+    avg_gpu_usage: Optional[float] = None
+    avg_vram_usage_mb: Optional[float] = None
+    avg_fps: Optional[float] = None
+    avg_map: Optional[float] = None
+    avg_iou: Optional[float] = None
 
 class EnsembleResult(BaseModel):
     detections: List[Detection]
@@ -98,43 +156,258 @@ class AnalysisResponse(BaseModel):
     models: List[ModelResult]
     ensemble: Optional[EnsembleResult] = None
 
+class EnsembleRequest(BaseModel):
+    results: List[ModelResult]
 
-# Mock Inference Functions - To be replaced by inference.py
-async def mock_cascade_rcnn_inference() -> ModelResult:
-    # Temporarily kept until inference.py is connected
-    await asyncio.sleep(0.4) 
-    return ModelResult(
-        model_id="cascade-rcnn",
-        model_name="Cascade R-CNN R50",
-        detections=[],
-        metrics=ModelMetrics(
-            inference_time_ms=random.uniform(115.0, 135.0),
-            gpu_usage=random.uniform(88.0, 95.0),
-            vram_usage_mb=4520.0
+@app.post("/api/compute-ensemble", response_model=EnsembleResult)
+async def compute_ensemble(request: EnsembleRequest):
+    """
+    Computes ensemble (WBF) results from a list of previously computed model results.
+    """
+    from ensemble_logic import weighted_box_fusion, calculate_ensemble_metrics
+    
+    if not request.results:
+        return EnsembleResult(
+            detections=[],
+            metrics=EnsembleMetrics(consensus_score=0, iou_threshold=0.5, sigma=0.0)
+        )
+        
+    detections_by_model = [r.detections for r in request.results]
+    # Convert Pydantic models back to dict for the logic module
+    detections_dicts = []
+    for model_dets in detections_by_model:
+        detections_dicts.append([d.dict() for d in model_dets])
+        
+    fused_detections = weighted_box_fusion(detections_dicts)
+    metrics = calculate_ensemble_metrics([r.dict() for r in request.results])
+    
+    return EnsembleResult(
+        detections=[Detection(**d) for d in fused_detections],
+        metrics=EnsembleMetrics(
+            consensus_score=sum(d['agreement'] for d in fused_detections)/max(len(fused_detections), 1) if fused_detections else 1.0,
+            iou_threshold=0.5,
+            sigma=0.0,
+            avg_inference_time_ms=metrics.get("avg_inference_time_ms"),
+            avg_gpu_usage=metrics.get("avg_gpu_usage"),
+            avg_vram_usage_mb=metrics.get("avg_vram_usage_mb"),
+            avg_fps=metrics.get("avg_fps"),
+            avg_map=metrics.get("avg_map"),
+            avg_iou=metrics.get("avg_iou")
         )
     )
 
 
+
+
+
+
 @app.post("/api/analyze", response_model=AnalysisResponse)
 async def analyze_image(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    models: Optional[str] = Form(None) # Comma separated model IDs
 ):
     """
-    Deprecated for Independent Analysis. Will only run cascade-rcnn if called.
+    Analyzes an uploaded image using MULTIPLE models and computes ensemble results.
     """
-    print(f"[INFO] Received file for analysis: {file.filename}")
+    print(f"[INFO] Received file for MULTI-MODEL analysis: {file.filename}")
     start_time = time.time()
     
-    model_result = await mock_cascade_rcnn_inference()
+    # 1. Parse model IDs
+    requested_model_ids = ["cascade-rcnn-r50-tiny"] # Default
+    if models:
+        requested_model_ids = [m.strip() for m in models.split(",") if m.strip()]
     
+    # 2. Read file content once
+    content = await file.read()
+    
+    # 3. Import logic
+    from ensemble_logic import weighted_box_fusion, calculate_ensemble_metrics
+    
+    results = []
+    detections_by_model = []
+    
+    # 4. Run each model (Sequential for now to avoid VRAM overload, can be parallelized if small)
+    for mid in requested_model_ids:
+        try:
+            # We reuse the logic from analyze_single but as a helper
+            inference_out = await asyncio.to_thread(run_inference, content, mid, dynamic_models if mid in dynamic_models else None)
+            
+            if inference_out.get("success"):
+                metrics_dict = inference_out.get("metrics", {})
+                detections = []
+                for det in inference_out.get("detections", []):
+                    detections.append(Detection(**det))
+                
+                model_name = "Cascade R-CNN R50 Tiny"
+                if mid in dynamic_models:
+                    model_name = dynamic_models[mid]["name"]
+                
+                eval_data = get_eval_metrics().get(mid, {})
+                frame_dets = [VideoFrameDetections(timestamp_ms=f.get("timestamp_ms", 0.0),
+                                                  detections=[Detection(**d) for d in f.get("detections", [])])
+                              for f in inference_out.get("frame_detections", [])]
+                pr_curve = [PRPoint(**p) for p in inference_out.get("pr_curve", [])]
+                if not pr_curve:
+                    pr_curve = [PRPoint(**p) for p in (eval_data.get("pr_curve") or [])]
+                
+                model_result = ModelResult(
+                    model_id=mid,
+                    model_name=model_name,
+                    detections=detections,
+                    visualized_image=inference_out.get("visualized_image"),
+                    heatmap_image=inference_out.get("heatmap_image"),
+                    frame_detections=frame_dets,
+                    pr_curve=pr_curve,
+                    metrics=ModelMetrics(
+                        inference_time_ms=metrics_dict.get("inference_time_ms", 0.0),
+                        fps=metrics_dict.get("fps", 0.0),
+                        gpu_usage=metrics_dict.get("gpu_usage", 0.0),
+                        vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0),
+                        map=metrics_dict.get("map") or eval_data.get("map"),
+                        iou=metrics_dict.get("iou") or eval_data.get("iou")
+                    )
+                )
+                results.append(model_result)
+                detections_by_model.append(inference_out.get("detections", []))
+            else:
+                print(f"[ERROR] Inference failed for model {mid}: {inference_out.get('error')}")
+        except Exception as e:
+            print(f"[ERROR] Exception running model {mid}: {e}")
+            
+    # 5. Compute Ensemble
+    ensemble_result = None
+    if len(results) > 0:
+        fused_detections = weighted_box_fusion(detections_by_model)
+        metrics = calculate_ensemble_metrics([r.dict() for r in results])
+        
+        ensemble_result = EnsembleResult(
+            detections=[Detection(**d) for d in fused_detections],
+            metrics=EnsembleMetrics(
+                consensus_score=sum(d['agreement'] for d in fused_detections)/max(len(fused_detections), 1) if fused_detections else 1.0,
+                iou_threshold=0.5,
+                sigma=0.0, # Not used for now
+                avg_inference_time_ms=metrics.get("avg_inference_time_ms"),
+                avg_gpu_usage=metrics.get("avg_gpu_usage"),
+                avg_vram_usage_mb=metrics.get("avg_vram_usage_mb"),
+                avg_fps=metrics.get("avg_fps"),
+                avg_map=metrics.get("avg_map"),
+                avg_iou=metrics.get("avg_iou")
+            )
+        )
+        # Update metrics with avg values
+        # metrics["consensus_score"] = ensemble_result.metrics.consensus_score
+
     total_time = (time.time() - start_time) * 1000
-    print(f"[INFO] Analysis complete in {total_time:.2f}ms")
+    print(f"[INFO] Multi-Model Analysis complete in {total_time:.2f}ms")
 
     return AnalysisResponse(
         status="success",
         image_id=f"img_{int(time.time())}",
-        models=[model_result],
-        ensemble=None
+        models=results,
+        ensemble=ensemble_result
+    )
+
+
+@app.post("/api/analyze-video", response_model=AnalysisResponse)
+async def analyze_video(
+    file: UploadFile = File(...),
+    models: Optional[str] = Form(None)
+):
+    """
+    Analyzes an uploaded video using MULTIPLE models and computes ensemble results.
+    """
+    print(f"[INFO] Received file for MULTI-MODEL video analysis: {file.filename}")
+    start_time = time.time()
+
+    requested_model_ids = ["cascade-rcnn-r50-tiny"]
+    if models:
+        requested_model_ids = [m.strip() for m in models.split(",") if m.strip()]
+
+    content = await file.read()
+
+    from ensemble_logic import weighted_box_fusion, calculate_ensemble_metrics
+
+    results = []
+    detections_by_model = []
+
+    for mid in requested_model_ids:
+        try:
+            inference_out = await asyncio.to_thread(
+                run_video_inference,
+                content,
+                mid,
+                dynamic_models if mid in dynamic_models else None,
+                file.filename,
+            )
+
+            if inference_out.get("success"):
+                metrics_dict = inference_out.get("metrics", {})
+                detections = [Detection(**det) for det in inference_out.get("detections", [])]
+
+                model_name = "Cascade R-CNN R50 Tiny"
+                if mid in dynamic_models:
+                    model_name = dynamic_models[mid]["name"]
+
+                eval_data = get_eval_metrics().get(mid, {})
+                frame_dets = [VideoFrameDetections(timestamp_ms=f.get("timestamp_ms", 0.0),
+                                                  detections=[Detection(**d) for d in f.get("detections", [])])
+                              for f in inference_out.get("frame_detections", [])]
+                pr_curve = [PRPoint(**p) for p in inference_out.get("pr_curve", [])]
+                if not pr_curve:
+                    pr_curve = [PRPoint(**p) for p in (eval_data.get("pr_curve") or [])]
+                
+                model_result = ModelResult(
+                    model_id=mid,
+                    model_name=model_name,
+                    detections=detections,
+                    visualized_image=inference_out.get("visualized_image"),
+                    heatmap_image=inference_out.get("heatmap_image"),
+                    frame_detections=frame_dets,
+                    pr_curve=pr_curve,
+                    metrics=ModelMetrics(
+                        inference_time_ms=metrics_dict.get("inference_time_ms", 0.0),
+                        fps=metrics_dict.get("fps", 0.0),
+                        gpu_usage=metrics_dict.get("gpu_usage", 0.0),
+                        vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0),
+                        map=metrics_dict.get("map") or eval_data.get("map"),
+                        iou=metrics_dict.get("iou") or eval_data.get("iou"),
+                    )
+                )
+                results.append(model_result)
+                detections_by_model.append(inference_out.get("detections", []))
+            else:
+                print(f"[ERROR] Video inference failed for model {mid}: {inference_out.get('error')}")
+        except Exception as e:
+            print(f"[ERROR] Exception running video model {mid}: {e}")
+
+    ensemble_result = None
+    if len(results) > 0:
+        fused_detections = weighted_box_fusion(detections_by_model)
+        metrics = calculate_ensemble_metrics([r.dict() for r in results])
+
+        ensemble_result = EnsembleResult(
+            detections=[Detection(**d) for d in fused_detections],
+            metrics=EnsembleMetrics(
+                consensus_score=sum(d['agreement'] for d in fused_detections)/max(len(fused_detections), 1) if fused_detections else 1.0,
+                iou_threshold=0.5,
+                sigma=0.0,
+                avg_inference_time_ms=metrics.get("avg_inference_time_ms"),
+                avg_gpu_usage=metrics.get("avg_gpu_usage"),
+                avg_vram_usage_mb=metrics.get("avg_vram_usage_mb"),
+                avg_fps=metrics.get("avg_fps"),
+                avg_map=metrics.get("avg_map"),
+                avg_iou=metrics.get("avg_iou")
+            )
+        )
+
+    total_time = (time.time() - start_time) * 1000
+    print(f"[INFO] Multi-Model Video Analysis complete in {total_time:.2f}ms")
+
+    return AnalysisResponse(
+        status="success",
+        image_id=f"vid_{int(time.time())}",
+        models=results,
+        ensemble=ensemble_result
     )
 
 @app.post("/api/analyze-single", response_model=AnalysisResponse)
@@ -154,7 +427,7 @@ async def analyze_single(
     with open("debug_analyze.log", "a") as dbg: dbg.write(f"\n[INFO] Starting analysis for {model_id}\n")
     
     model_result = None
-    if model_id == "cascade-rcnn":
+    if model_id == "cascade-rcnn-r50-tiny":
         # 1. Run real PyTorch inference
         try:
             inference_out = await asyncio.to_thread(run_inference, content)
@@ -168,32 +441,32 @@ async def analyze_single(
         # 2. Map inference output to standard ModelResult
         if inference_out.get("success"):
             metrics_dict = inference_out.get("metrics", {})
-            detections = []
-            for det in inference_out.get("detections", []):
-                detections.append(Detection(
-                    class_name=det["class_name"],
-                    confidence=det["confidence"],
-                    box=BoundingBox(
-                        x=det["box"]["x"],
-                        y=det["box"]["y"],
-                        width=det["box"]["width"],
-                        height=det["box"]["height"]
-                    )
-                ))
+            detections = [Detection(**det) for det in inference_out.get("detections", [])]
             try:
+                eval_data = get_eval_metrics().get(model_id, {})
+                pr_curve = [PRPoint(**p) for p in inference_out.get("pr_curve", [])]
+                if not pr_curve:
+                    pr_curve = [PRPoint(**p) for p in (eval_data.get("pr_curve") or [])]
+                    
                 model_result = ModelResult(
                     model_id=model_id,
-                    model_name="Cascade R-CNN R50",
+                    model_name="Cascade R-CNN R50 Tiny",
                     detections=detections,
                     visualized_image=inference_out.get("visualized_image"),
                     heatmap_image=inference_out.get("heatmap_image"),
+                    pr_curve=pr_curve,
                     metrics=ModelMetrics(
                         inference_time_ms=metrics_dict.get("inference_time_ms", 0.0),
                         fps=metrics_dict.get("fps", 0.0),
                         gpu_usage=metrics_dict.get("gpu_usage", 0.0),
-                        vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0)
+                        vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0),
+                        map=metrics_dict.get("map") or eval_data.get("map"),
+                        iou=metrics_dict.get("iou") or eval_data.get("iou")
                     )
                 )
+                print(f"[DEBUG] Single Model PR Curve length: {len(pr_curve)}")
+                print(f"[DEBUG] Single Model mAP: {model_result.metrics.map}")
+                model_result = model_result
                 with open("debug_analyze.log", "a") as dbg: dbg.write("ModelResult created successfully\n")
             except Exception as e:
                 import traceback
@@ -214,29 +487,26 @@ async def analyze_single(
         
         if inference_out.get("success"):
             metrics_dict = inference_out.get("metrics", {})
-            detections = []
-            for det in inference_out.get("detections", []):
-                detections.append(Detection(
-                    class_name=det["class_name"],
-                    confidence=det["confidence"],
-                    box=BoundingBox(
-                        x=det["box"]["x"],
-                        y=det["box"]["y"],
-                        width=det["box"]["width"],
-                        height=det["box"]["height"]
-                    )
-                ))
+            detections = [Detection(**det) for det in inference_out.get("detections", [])]
+            eval_data = get_eval_metrics().get(model_id, {})
+            pr_curve = [PRPoint(**p) for p in inference_out.get("pr_curve", [])]
+            if not pr_curve:
+                pr_curve = [PRPoint(**p) for p in (eval_data.get("pr_curve") or [])]
+                
             model_result = ModelResult(
                 model_id=model_id,
                 model_name=dynamic_models[model_id]["name"],
                 detections=detections,
                 visualized_image=inference_out.get("visualized_image"),
                 heatmap_image=inference_out.get("heatmap_image"),
+                pr_curve=pr_curve,
                 metrics=ModelMetrics(
                     inference_time_ms=metrics_dict.get("inference_time_ms", 0.0),
                     fps=metrics_dict.get("fps", 0.0),
                     gpu_usage=metrics_dict.get("gpu_usage", 0.0),
-                    vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0)
+                    vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0),
+                    map=metrics_dict.get("map") or eval_data.get("map"),
+                    iou=metrics_dict.get("iou") or eval_data.get("iou")
                 )
             )
         else:
@@ -261,6 +531,71 @@ async def analyze_single(
     return AnalysisResponse(
         status="success",
         image_id=f"img_{int(time.time())}",
+        models=[model_result] if model_result else [],
+        ensemble=None
+    )
+
+
+@app.post("/api/analyze-video-single", response_model=AnalysisResponse)
+async def analyze_video_single(
+    model_id: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """
+    Analyzes an uploaded video using a SINGLE specified model.
+    """
+    print(f"[INFO] Received file for SINGLE video analysis: {file.filename} with model: {model_id}")
+    start_time = time.time()
+
+    content = await file.read()
+
+    model_result = None
+    if model_id == "cascade-rcnn-r50-tiny" or model_id in dynamic_models:
+        registry = dynamic_models if model_id in dynamic_models else None
+        inference_out = await asyncio.to_thread(run_video_inference, content, model_id, registry, file.filename)
+
+        if inference_out.get("success"):
+            metrics_dict = inference_out.get("metrics", {})
+            detections = [Detection(**det) for det in inference_out.get("detections", [])]
+
+            model_name = "Cascade R-CNN R50 Tiny"
+            if model_id in dynamic_models:
+                model_name = dynamic_models[model_id]["name"]
+
+            eval_data = get_eval_metrics().get(model_id, {})
+            frame_dets = [VideoFrameDetections(timestamp_ms=f.get("timestamp_ms", 0.0),
+                                              detections=[Detection(**d) for d in f.get("detections", [])])
+                          for f in inference_out.get("frame_detections", [])]
+            pr_curve = [PRPoint(**p) for p in inference_out.get("pr_curve", [])]
+            if not pr_curve:
+                pr_curve = [PRPoint(**p) for p in (eval_data.get("pr_curve") or [])]
+                
+            model_result = ModelResult(
+                model_id=model_id,
+                model_name=model_name,
+                detections=detections,
+                visualized_image=inference_out.get("visualized_image"),
+                heatmap_image=inference_out.get("heatmap_image"),
+                frame_detections=frame_dets,
+                pr_curve=pr_curve,
+                metrics=ModelMetrics(
+                    inference_time_ms=metrics_dict.get("inference_time_ms", 0.0),
+                    fps=metrics_dict.get("fps", 0.0),
+                    gpu_usage=metrics_dict.get("gpu_usage", 0.0),
+                    vram_usage_mb=metrics_dict.get("vram_usage_mb", 0.0),
+                    map=metrics_dict.get("map") or eval_data.get("map"),
+                    iou=metrics_dict.get("iou") or eval_data.get("iou"),
+                )
+            )
+        else:
+            print(f"[ERROR] Video inference failed for model {model_id}: {inference_out.get('error')}")
+
+    total_time = (time.time() - start_time) * 1000
+    print(f"[INFO] Single Video Analysis complete in {total_time:.2f}ms")
+
+    return AnalysisResponse(
+        status="success",
+        image_id=f"vid_{int(time.time())}",
         models=[model_result] if model_result else [],
         ensemble=None
     )

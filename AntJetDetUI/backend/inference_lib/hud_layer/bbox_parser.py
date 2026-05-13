@@ -1,6 +1,14 @@
 from typing import Dict, Any, List
 
-def parse_detections(result, img_shape, confidence_thr: float, class_names: dict) -> List[Dict[str, Any]]:
+def parse_detections(
+    result,
+    img_shape,
+    confidence_thr: float,
+    class_names: dict,
+    fov_x_deg: float = 60.0,
+    fov_y_deg: float = 40.0,
+    ref_area_scale: float = 0.15,
+) -> List[Dict[str, Any]]:
     """Filters inference results by confidence and normalizes bounding box coordinates (0-1 range).
     
     This feeds data primarily to the HUD Layer and Objects Tab.
@@ -30,14 +38,14 @@ def parse_detections(result, img_shape, confidence_thr: float, class_names: dict
             center_y = ny + (nh / 2)
             
             # Assuming ~60deg Horizontal FOV / ~40deg Vertical FOV
-            azimuth = (center_x - 0.5) * 60.0
-            elevation = (0.5 - center_y) * 40.0 # Standard: positive is UP
+            azimuth = (center_x - 0.5) * fov_x_deg
+            elevation = (0.5 - center_y) * fov_y_deg # Standard: positive is UP
             
             # 2. Distance Estimation (Inverse square law approximation)
             # Reference: A jet occupying 10% of image height is approx 1.5km away
             area = nw * nh
             if area > 0:
-                distance_km = 0.15 / math.sqrt(area)
+                distance_km = ref_area_scale / math.sqrt(area)
             else:
                 distance_km = 0.0
 
@@ -54,4 +62,5 @@ def parse_detections(result, img_shape, confidence_thr: float, class_names: dict
                 "elevation": float(round(elevation, 2)),
                 "distance_km": float(round(distance_km, 2))
             })
+    detections.sort(key=lambda d: d.get("confidence", 0.0), reverse=True)
     return detections

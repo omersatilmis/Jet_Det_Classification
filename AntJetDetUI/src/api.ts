@@ -17,11 +17,18 @@ export interface Detection {
     distance_km?: number;
 }
 
+export interface VideoFrameDetections {
+    timestamp_ms: number;
+    detections: Detection[];
+}
+
 export interface ModelMetrics {
     inference_time_ms: number;
     fps?: number;
     gpu_usage?: number;
     vram_usage_mb?: number;
+    map?: number;
+    iou?: number;
 }
 
 export interface ModelResult {
@@ -31,12 +38,20 @@ export interface ModelResult {
     metrics: ModelMetrics;
     visualized_image?: string;
     heatmap_image?: string;
+    frame_detections?: VideoFrameDetections[];
+    pr_curve?: { recall: number; precision: number }[];
 }
 
 export interface EnsembleMetrics {
     consensus_score: number;
     iou_threshold: number;
     sigma: number;
+    avg_inference_time_ms?: number;
+    avg_gpu_usage?: number;
+    avg_vram_usage_mb?: number;
+    avg_fps?: number;
+    avg_map?: number;
+    avg_iou?: number;
 }
 
 export interface EnsembleResult {
@@ -58,11 +73,33 @@ export const analyzeImage = async (file: File, activeModels: ModelData[]): Promi
     const formData = new FormData();
     formData.append('file', file);
 
-    // In the future, pass active models parameter here if needed
-    // const modelIds = activeModels.map(m => m.id).join(',');
-    // formData.append('models', modelIds);
+    // Pass active models parameter
+    const modelIds = activeModels.map(m => m.id).join(',');
+    formData.append('models', modelIds);
 
     const response = await fetch('/api/analyze', {
+        method: 'POST',
+        body: formData,
+    });
+
+    if (!response.ok) {
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json() as AnalysisResponse;
+};
+
+/**
+ * Sends a video to the FastAPI backend for analysis
+ */
+export const analyzeVideo = async (file: File, activeModels: ModelData[]): Promise<AnalysisResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const modelIds = activeModels.map(m => m.id).join(',');
+    formData.append('models', modelIds);
+
+    const response = await fetch('/api/analyze-video', {
         method: 'POST',
         body: formData,
     });
@@ -117,6 +154,26 @@ export async function analyzeSingleImage(modelId: string, imageFile: File): Prom
 }
 
 /**
+ * Analyzes a video using a single specified model via the `/api/analyze-video-single` endpoint.
+ */
+export async function analyzeSingleVideo(modelId: string, videoFile: File): Promise<AnalysisResponse> {
+    const formData = new FormData();
+    formData.append('model_id', modelId);
+    formData.append('file', videoFile);
+
+    const response = await fetch('/api/analyze-video-single', {
+        method: 'POST',
+        body: formData,
+    });
+
+    if (!response.ok) {
+        throw new Error(`Single video analysis failed: ${response.statusText}`);
+    }
+
+    return await response.json() as AnalysisResponse;
+}
+
+/**
  * Fetches the list of user-uploaded models from the persistent backend
  */
 export async function fetchModels(): Promise<{ status: string, models: any[] }> {
@@ -138,4 +195,23 @@ export async function deleteModel(modelId: string): Promise<any> {
         throw new Error(`Failed to delete model: ${response.statusText}`);
     }
     return response.json();
+}
+
+/**
+ * Computes ensemble result from a list of model results.
+ */
+export async function computeEnsemble(results: ModelResult[]): Promise<EnsembleResult> {
+    const response = await fetch('/api/compute-ensemble', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ results }),
+    });
+
+    if (!response.ok) {
+        throw new Error(`Ensemble computation failed: ${response.statusText}`);
+    }
+
+    return await response.json() as EnsembleResult;
 }

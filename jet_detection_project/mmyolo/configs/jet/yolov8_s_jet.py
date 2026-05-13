@@ -168,6 +168,7 @@ train_dataloader = dict(
 
 # Batch shapes: val'de +0.02 mAP kazandırır
 batch_shapes_cfg = dict(
+    _delete_=True,
     type='BatchShapePolicy',
     batch_size=val_batch_size_per_gpu,
     img_size=img_scale[0],

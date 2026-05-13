@@ -1,5 +1,5 @@
 // ============================================================
-// MOCK DATA — Jet Aircraft Detection & Intelligence System
+// JET SENTINEL — Jet Aircraft Detection & Intelligence System
 // ============================================================
 
 export interface Detection {
@@ -10,6 +10,11 @@ export interface Detection {
   azimuth?: number;
   elevation?: number;
   distance_km?: number;
+}
+
+export interface VideoFrameDetections {
+  timestamp_ms: number;
+  detections: Detection[];
 }
 
 export interface PRPoint {
@@ -34,12 +39,13 @@ export interface ModelData {
   consensusScore: number;
   visualizedImage?: string;
   heatmapImage?: string;
+  videoFrames?: VideoFrameDetections[];
 }
 
 export const MODEL_DATA: Record<string, ModelData> = {
-  "cascade-rcnn": {
-    id: "cascade-rcnn",
-    name: "Cascade R-CNN R50",
+  "cascade-rcnn-r50-tiny": {
+    id: "cascade-rcnn-r50-tiny",
+    name: "Cascade R-CNN R50 Tiny",
     shortName: "CAS-R50",
     color: "#00FF41",
     inferenceTime: 0,
@@ -56,7 +62,7 @@ export const MODEL_DATA: Record<string, ModelData> = {
 };
 
 export const MODEL_OPTIONS = [
-  { id: "cascade-rcnn", label: "Cascade R-CNN R50" },
+  { id: "cascade-rcnn-r50-tiny", label: "Cascade R-CNN R50 Tiny" },
 ];
 
 export const ENSEMBLE_DATA = {

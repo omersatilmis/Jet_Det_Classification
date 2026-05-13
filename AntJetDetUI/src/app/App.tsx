@@ -45,77 +45,122 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [mediaType, setMediaType] = useState<"image" | "video" | null>(null);
   const [analyzingModels, setAnalyzingModels] = useState<Set<string>>(new Set());
-  const [isAnalyzed, setIsAnalyzed] = useState(false); // Can technically keep global to signal "at least one run"
+  const [isAnalyzed, setIsAnalyzed] = useState(false);
   const [activeModels, setActiveModels] = useState([
-    MODEL_DATA["cascade-rcnn"]
+    MODEL_DATA["cascade-rcnn-r50-tiny"]
   ]);
   const [analysisProgress, setAnalysisProgress] = useState<Record<string, number>>({});
   const [logLines, setLogLines] = useState<string[]>([]);
+  const [ensembleResult, setEnsembleResult] = useState<any>(null);
+  const [currentVideoTimeMs, setCurrentVideoTimeMs] = useState<number | null>(null);
 
-  // Cleanup object URLs to prevent memory leaks
   useEffect(() => {
     return () => {
       if (imageUrl) URL.revokeObjectURL(imageUrl);
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
     };
-  }, [imageUrl]);
+  }, [imageUrl, videoUrl]);
 
-  const handleLoadImage = () => {
-    // Open a file picker
+  const handleLoadMedia = (file?: File) => {
+    if (file) {
+      if (imageUrl) URL.revokeObjectURL(imageUrl);
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+
+      const isVideo = file.type.startsWith("video/");
+      const objectUrl = URL.createObjectURL(file);
+      setSelectedFile(file);
+      setMediaType(isVideo ? "video" : "image");
+      setImageUrl(isVideo ? null : objectUrl);
+      setVideoUrl(isVideo ? objectUrl : null);
+
+      setIsAnalyzed(false);
+      setAnalyzingModels(new Set());
+      setAnalysisProgress({});
+      setActiveModels(prev => prev.map(m => ({
+        ...m,
+        detections: [],
+        inferenceTime: 0,
+        fps: 0,
+        vramUsage: 0,
+        gpuUsage: 0,
+        videoFrames: []
+      })));
+      setLogLines([`[SYS] Medya seçildi: ${file.name}`]);
+      return;
+    }
+
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/*";
+    input.accept = "image/*,video/*";
     input.onchange = (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
-      if (file) {
-        if (imageUrl) URL.revokeObjectURL(imageUrl);
-        setSelectedFile(file);
-        setImageUrl(URL.createObjectURL(file));
-
-        // Reset states
-        setIsAnalyzed(false);
-        setAnalyzingModels(new Set());
-        setAnalysisProgress({});
-        setActiveModels(prev => prev.map(m => ({
-          ...m,
-          detections: [],
-          inferenceTime: 0,
-          fps: 0,
-          vramUsage: 0,
-          gpuUsage: 0
-        })));
-        setLogLines([`[SYS] Görsel seçildi: ${file.name}`]);
-      }
+      if (file) handleLoadMedia(file);
     };
     input.click();
   };
 
-  const handleAnalyzeSingle = async (modelId: string) => {
-    if (!selectedFile) return;
+  const handleAnalyzeAll = async () => {
+    if (!selectedFile || activeModels.length === 0) return;
 
-    setAnalyzingModels(prev => new Set(prev).add(modelId));
+    const modelIds = activeModels.map(m => m.id);
+    setAnalyzingModels(new Set(modelIds));
+    setLogLines((prev) => [...prev, `[SYS] Sıralı çoklu model analizi başlatılıyor (${modelIds.length} model)...`]);
+    
+    setIsAnalyzed(false);
+    setEnsembleResult(null);
+
+    try {
+      const { computeEnsemble } = await import('../api');
+      
+      // Run each model sequentially
+      const completedResults: any[] = [];
+      
+      for (const mid of modelIds) {
+        const result = await handleAnalyzeSingle(mid, true);
+        if (result && result.models && result.models[0]) {
+          completedResults.push(result.models[0]);
+        }
+      }
+      
+      if (completedResults.length > 0) {
+        setLogLines((prev) => [...prev, `[WBF] Modeller tamamlandı, hibrit karar hesaplanıyor...`]);
+        const ensemble = await computeEnsemble(completedResults);
+        setEnsembleResult(ensemble);
+        setIsAnalyzed(true);
+        setLogLines((prev) => [...prev, `[SYS] Analiz Tamamlandı. Hibrit karara varıldı.`]);
+      }
+
+    } catch (error) {
+      console.error(`Multi-Analysis Failed:`, error);
+      setLogLines((prev) => [...prev, `[ERROR] Çoklu analiz başarısız: ${error}`]);
+    } finally {
+      setAnalyzingModels(new Set());
+    }
+  };
+
+  const handleAnalyzeSingle = async (modelId: string, silent: boolean = false) => {
+    if (!selectedFile) return null;
+
+    if (!silent) {
+        setAnalyzingModels(prev => new Set(prev).add(modelId));
+        setEnsembleResult(null); // Reset ensemble if individual model is re-run
+    }
     setAnalysisProgress(prev => ({ ...prev, [modelId]: 10 }));
     setLogLines((prev) => [...prev, `[SYS] ${modelId} modeli başlatılıyor...`]);
 
     try {
-      const { analyzeSingleImage } = await import('../api');
-
-      // We simulate progress for the UI while waiting on the real fetch
-      const progressInterval = setInterval(() => {
-        setAnalysisProgress(prev => ({
-          ...prev,
-          [modelId]: Math.min((prev[modelId] || 10) + 15, 85)
-        }));
-      }, 200);
-
-      const result = await analyzeSingleImage(modelId, selectedFile);
-      clearInterval(progressInterval);
+      const { analyzeSingleImage, analyzeSingleVideo } = await import('../api');
+      const result = mediaType === "video"
+        ? await analyzeSingleVideo(modelId, selectedFile)
+        : await analyzeSingleImage(modelId, selectedFile);
+      
       setAnalysisProgress(prev => ({ ...prev, [modelId]: 100 }));
 
-      // Map backend `result.models[0]` back to the UI `activeModels`
-      const updatedModels = activeModels.map((baseModel) => {
+      setActiveModels(prevModels => prevModels.map((baseModel) => {
         if (baseModel.id !== modelId) return baseModel;
-
         const backendData = result.models[0];
         if (!backendData) return baseModel;
 
@@ -127,7 +172,24 @@ function App() {
           vramUsage: backendData.metrics.vram_usage_mb
             ? backendData.metrics.vram_usage_mb / 1024
             : baseModel.vramUsage,
-          detections: backendData.detections.map((d: import('../api').Detection, i: number) => ({
+          mAP: backendData.metrics.map ?? baseModel.mAP,
+          ioU: backendData.metrics.iou ?? baseModel.ioU,
+          prCurve: backendData.pr_curve ? backendData.pr_curve : baseModel.prCurve,
+          videoFrames: backendData.frame_detections
+            ? backendData.frame_detections.map((frame: any) => ({
+                timestamp_ms: frame.timestamp_ms,
+                detections: frame.detections.map((d: any, i: number) => ({
+                  label: d.class_name,
+                  confidence: d.confidence,
+                  bbox: [d.box.x, d.box.y, d.box.width, d.box.height] as [number, number, number, number],
+                  targetId: `TGT-${i + 1}`,
+                  azimuth: d.azimuth,
+                  elevation: d.elevation,
+                  distance_km: d.distance_km,
+                })),
+              }))
+            : [],
+          detections: backendData.detections.map((d: any, i: number) => ({
             label: d.class_name,
             confidence: d.confidence,
             bbox: [d.box.x, d.box.y, d.box.width, d.box.height] as [number, number, number, number],
@@ -139,39 +201,41 @@ function App() {
           visualizedImage: backendData.visualized_image,
           heatmapImage: backendData.heatmap_image
         };
-      });
+      }));
 
-      setActiveModels(updatedModels);
-
-      setLogLines((prev) => [
-        ...prev,
-        `[SYS] ${modelId} Analizi Tamamlandı. ${result.models[0]?.detections.length || 0} nesne bulundu.`
-      ]);
-
-      setIsAnalyzed(true);
-
+      setLogLines((prev) => [...prev, `[SYS] ${modelId} Analizi Tamamlandı.`]);
+      
+      if (!silent) {
+          setIsAnalyzed(true);
+      }
+      return result;
     } catch (error) {
       console.error(`Analysis Failed for ${modelId}:`, error);
       setLogLines((prev) => [...prev, `[ERROR] ${modelId} analizi başarısız: ${error}`]);
-      setAnalysisProgress(prev => ({ ...prev, [modelId]: 0 }));
+      return null;
     } finally {
-      setAnalyzingModels(prev => {
-        const next = new Set(prev);
-        next.delete(modelId);
-        return next;
-      });
+      if (!silent) {
+          setAnalyzingModels(prev => {
+            const next = new Set(prev);
+            next.delete(modelId);
+            return next;
+          });
+      }
     }
   };
 
   const handleReset = () => {
     setSelectedFile(null);
     if (imageUrl) URL.revokeObjectURL(imageUrl);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
     setImageUrl(null);
-
+    setVideoUrl(null);
+    setMediaType(null);
     setAnalyzingModels(new Set());
     setIsAnalyzed(false);
     setAnalysisProgress({});
     setLogLines([]);
+    setEnsembleResult(null);
   };
 
   return (
@@ -186,10 +250,8 @@ function App() {
           overflow: "hidden",
         }}
       >
-        {/* Header */}
         <SystemHeader />
 
-        {/* Analysis control bar */}
         <AnimatePresence>
           {selectedFile && (
             <motion.div
@@ -204,9 +266,31 @@ function App() {
               }}
             >
               <div className="flex items-center gap-4 px-6 py-2">
-                {/* Removed global analyze button */}
+                <button
+                  onClick={handleAnalyzeAll}
+                  disabled={analyzingModels.size > 0 || activeModels.length === 0}
+                  className="flex items-center gap-2 px-6 py-2 rounded transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed group"
+                  style={{
+                    background: analyzingModels.size > 0 
+                      ? "rgba(0,255,65,0.05)" 
+                      : "linear-gradient(135deg, rgba(0,255,65,0.1), rgba(0,229,255,0.1))",
+                    border: "1px solid rgba(0,255,65,0.3)",
+                    boxShadow: analyzingModels.size > 0 ? "none" : "0 0 15px rgba(0,255,65,0.1)",
+                  }}
+                >
+                  {analyzingModels.size > 0 ? (
+                    <>
+                      <RefreshCw size={14} className="animate-spin text-[#00FF41]" />
+                      <span className="text-[#00FF41] text-[10px] tracking-[0.2em] font-bold">ANALİZ SÜRÜYOR</span>
+                    </>
+                  ) : (
+                    <>
+                      <Play size={14} className="text-[#00FF41] group-hover:scale-110 transition-transform" />
+                      <span className="text-[#00FF41] text-[10px] tracking-[0.2em] font-bold">TÜMÜNÜ ANALİZ ET</span>
+                    </>
+                  )}
+                </button>
 
-                {/* Reset */}
                 <button
                   onClick={handleReset}
                   className="flex items-center gap-2 px-4 py-2 rounded transition-all duration-200"
@@ -222,7 +306,6 @@ function App() {
                   SIFIRLA
                 </button>
 
-                {/* Progress bar */}
                 {(analyzingModels.size > 0 || isAnalyzed) && (
                   <div className="flex-1 flex items-center gap-3">
                     <div
@@ -266,7 +349,6 @@ function App() {
                   </div>
                 )}
 
-                {/* Log stream */}
                 <div
                   className="flex-1 overflow-hidden"
                   style={{
@@ -302,12 +384,10 @@ function App() {
           )}
         </AnimatePresence>
 
-        {/* Main content */}
         <div
           className="flex-1 flex overflow-hidden"
           style={{ minHeight: 0 }}
         >
-          {/* Left panel */}
           <div
             className="flex flex-col"
             style={{
@@ -320,12 +400,14 @@ function App() {
             <LeftPanel
               activeModels={isAnalyzed ? activeModels : []}
               imageUrl={imageUrl}
+              videoUrl={videoUrl}
+              mediaType={mediaType}
               isAnalyzing={analyzingModels.size > 0}
-              onLoadImage={handleLoadImage}
+              onLoadMedia={handleLoadMedia}
+                onVideoTimeUpdate={setCurrentVideoTimeMs}
             />
           </div>
 
-          {/* Right panel */}
           <div
             className="flex flex-col flex-1"
             style={{ overflow: "hidden", minWidth: 0 }}
@@ -337,15 +419,14 @@ function App() {
               analyzingModels={analyzingModels}
               onAnalyze={handleAnalyzeSingle}
               canAnalyze={selectedFile !== null}
-              imageUrl={imageUrl}
+              imageUrl={mediaType === "image" ? imageUrl : null}
+                currentVideoTimeMs={mediaType === "video" ? currentVideoTimeMs : null}
             />
           </div>
         </div>
 
-        {/* Ensemble bottom panel */}
-        <EnsemblePanel activeModels={activeModels} isAnalyzed={isAnalyzed} />
+        <EnsemblePanel activeModels={activeModels} isAnalyzed={isAnalyzed} ensembleResult={ensembleResult} />
 
-        {/* Global scanlines overlay */}
         <div
           className="pointer-events-none fixed inset-0"
           style={{
